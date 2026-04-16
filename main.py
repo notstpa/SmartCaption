@@ -498,8 +498,8 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         self.max_words_per_subtitle = ctk.StringVar(value="8")
         self.max_chars_per_line = ctk.StringVar(value="42")
         self.beam_size = ctk.IntVar(value=5)
-        self.no_speech_threshold = ctk.DoubleVar(value=0.6)
-        self.condition_on_previous_text = ctk.BooleanVar(value=True)
+        self.no_speech_threshold = ctk.DoubleVar(value=0.8)
+        self.condition_on_previous_text = ctk.BooleanVar(value=False)
 
         self.available_models = ["tiny", "base", "small", "medium", "large-v3"]
         self.model_display_map = {}
@@ -926,8 +926,8 @@ class WhisperApp(ctk.CTk, DnDWrapper):
     def get_default_advanced_settings(self):
         return {
             "beam_size": 5,
-            "no_speech_threshold": 0.6,
-            "condition_on_previous_text": True,
+            "no_speech_threshold": 0.8,
+            "condition_on_previous_text": False,
         }
 
     def open_advanced_options(self):
@@ -1216,10 +1216,16 @@ class WhisperApp(ctk.CTk, DnDWrapper):
                 log_prob_threshold=-1.0,
                 no_speech_threshold=subtitle_settings["no_speech_threshold"],
                 condition_on_previous_text=subtitle_settings["condition_on_previous_text"],
-                word_timestamps=use_word_timestamps
+                word_timestamps=use_word_timestamps,
+                vad_filter=True,
+                vad_parameters={
+                    "min_silence_duration_ms": 700,
+                    "speech_pad_ms": 200,
+                }
             )
 
             subtitle_segments = self.build_subtitle_segments(segments, subtitle_settings)
+            subtitle_segments = self.normalize_subtitle_timings(subtitle_segments)
             self.log(f"Created {len(subtitle_segments)} subtitle segments.")
 
             output_file = subtitle_settings["output_file"]
@@ -1351,6 +1357,36 @@ class WhisperApp(ctk.CTk, DnDWrapper):
 
         return subtitle_segments
 
+    def normalize_subtitle_timings(self, subtitle_segments):
+        if not subtitle_segments:
+            return []
+
+        normalized_segments = []
+        previous_end = 0.0
+
+        for segment in sorted(subtitle_segments, key=lambda item: (item["start"], item["end"])):
+            start = max(float(segment["start"]), previous_end)
+            end = max(float(segment["end"]), start + 0.25)
+            text = segment["text"]
+
+            if normalized_segments:
+                gap = start - previous_end
+                if gap > 8.0:
+                    self.log(
+                        f"Large silent gap detected before subtitle {len(normalized_segments) + 1}; re-aligning timing."
+                    )
+
+            normalized_segments.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                }
+            )
+            previous_end = end
+
+        return normalized_segments
+
     def build_word_timed_segments(self, segment, subtitle_settings):
         words = getattr(segment, "words", None) or []
         if not words:
@@ -1365,6 +1401,12 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             word_end = getattr(word, "end", None)
             if not word_text or word_start is None or word_end is None:
                 continue
+
+            if current_words:
+                previous_word_end = getattr(current_words[-1], "end", None)
+                if previous_word_end is not None and word_start - previous_word_end >= 1.0:
+                    subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
+                    current_words = []
 
             current_words.append(word)
             if self.should_break_subtitle(current_words, subtitle_settings):
@@ -1381,12 +1423,13 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             return False
 
         text = self.join_words(words)
+        wrapped_lines = self.wrap_subtitle_lines(text, subtitle_settings)
         duration = words[-1].end - words[0].start
         last_word = words[-1].word.strip()
 
         if len(words) >= subtitle_settings["max_words"]:
             return True
-        if len(text) >= subtitle_settings["max_chars"]:
+        if len(wrapped_lines) > 2:
             return True
         if duration >= 3.2:
             return True
@@ -1414,6 +1457,10 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         return "".join(word.word for word in words).strip()
 
     def format_subtitle_text(self, text, subtitle_settings):
+        lines = self.wrap_subtitle_lines(text, subtitle_settings)
+        return "\n".join(lines)
+
+    def normalize_subtitle_text(self, text, subtitle_settings):
         if not text:
             return ""
 
@@ -1426,6 +1473,33 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             text = text.upper()
 
         return " ".join(text.split())
+
+    def wrap_subtitle_lines(self, text, subtitle_settings):
+        normalized_text = self.normalize_subtitle_text(text, subtitle_settings)
+        if not normalized_text:
+            return []
+
+        max_chars = subtitle_settings["max_chars"]
+        words = normalized_text.split()
+        lines = []
+        current_line = ""
+
+        for word in words:
+            if not current_line:
+                current_line = word
+                continue
+
+            candidate_line = f"{current_line} {word}"
+            if len(candidate_line) <= max_chars:
+                current_line = candidate_line
+            else:
+                lines.append(current_line)
+                current_line = word
+
+        if current_line:
+            lines.append(current_line)
+
+        return lines
 
 
 
