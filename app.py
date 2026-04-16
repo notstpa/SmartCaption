@@ -9,10 +9,11 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
+from huggingface_hub.utils import disable_progress_bars
 from tkinterdnd2 import DND_FILES
 from tkinterdnd2.TkinterDnD import DnDWrapper, _require
 
-APP_NAME = "SmartCaption 1.0.0"
+APP_NAME = "SmartCaption"
 MODEL_REPO_PREFIX = "Systran/faster-whisper-"
 SUPPORTED_MEDIA_EXTENSIONS = (
     ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".wma",
@@ -122,25 +123,55 @@ SUPPORTED_LANGUAGE_NAMES = {
 }
 
 
-def get_app_data_dir():
+def get_app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_user_data_dir():
     local_appdata = os.environ.get("LOCALAPPDATA")
     if local_appdata:
         return os.path.join(local_appdata, APP_NAME)
 
-    if getattr(sys, "frozen", False):
-        return os.path.join(os.path.dirname(sys.executable), APP_NAME)
-
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), APP_NAME)
+    return os.path.join(os.path.expanduser("~"), APP_NAME)
 
 
-APP_DATA_DIR = get_app_data_dir()
-MODEL_DIR = os.path.join(APP_DATA_DIR, "models")
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+def ensure_writable_dir(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe_path = os.path.join(path, ".smartcaption_write_test")
+        with open(probe_path, "w", encoding="utf-8") as probe_file:
+            probe_file.write("ok")
+        os.remove(probe_path)
+        return True
+    except OSError:
+        return False
+
+
+def resolve_model_dir(app_dir):
+    preferred_dir = os.path.join(app_dir, "models")
+    if ensure_writable_dir(preferred_dir):
+        return preferred_dir, "local"
+
+    fallback_dir = os.path.join(get_user_data_dir(), "models")
+    if ensure_writable_dir(fallback_dir):
+        return fallback_dir, "user"
+
+    raise OSError("Unable to create a writable models folder.")
+
+
+APP_DIR = get_app_dir()
+MODEL_DIR, MODEL_DIR_MODE = resolve_model_dir(APP_DIR)
 APP_ICON_PATH = os.path.join(APP_DIR, "icon.ico")
-os.makedirs(MODEL_DIR, exist_ok=True)
 
 os.environ["HF_HOME"] = MODEL_DIR
+os.environ["HF_HUB_CACHE"] = MODEL_DIR
 os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+disable_progress_bars()
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -485,6 +516,9 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         self.configure_ttk_styles()
         self.build_menu_bar()
         self.build_ui()
+        self.log(f"Models folder: {MODEL_DIR}")
+        if MODEL_DIR_MODE == "user":
+            self.log("App folder is not writable, so models will be stored in your user profile.")
         self.after(10, self.show_centered)
 
     def build_menu_bar(self):
@@ -820,24 +854,14 @@ class WhisperApp(ctk.CTk, DnDWrapper):
                 self.start_status_spinner(f"Downloading {model_name}...")
                 self.download_btn.configure(state="disabled")
                 self.generate_btn.configure(state="disabled")
+                self.delete_btn.configure(state="disabled")
                 self.model_menu.configure(state="disabled")
-                self.word_timestamps_checkbox.configure(state="disabled")
-                self.remove_punctuation_checkbox.configure(state="disabled")
-                self.text_case_menu.configure(state="disabled")
-                self.language_menu.configure(state="disabled")
-                self.max_words_entry.configure(state="disabled")
-                self.max_chars_entry.configure(state="disabled")
             else:
                 self.stop_status_spinner()
                 self.download_btn.configure(state="normal")
                 self.generate_btn.configure(state="normal")
+                self.delete_btn.configure(state="normal")
                 self.model_menu.configure(state="normal")
-                self.word_timestamps_checkbox.configure(state="normal")
-                self.remove_punctuation_checkbox.configure(state="normal")
-                self.text_case_menu.configure(state="normal")
-                self.language_menu.configure(state="readonly")
-                self.max_words_entry.configure(state="normal")
-                self.max_chars_entry.configure(state="normal")
 
         self.after(0, update_ui)
 
@@ -1028,7 +1052,9 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         try:
             snapshot_download(
                 repo_id=self.get_repo_id(model_name),
-                cache_dir=MODEL_DIR
+                cache_dir=MODEL_DIR,
+                max_workers=1,
+                tqdm_class=None
             )
 
             self.after(0, self.refresh_model_menu)

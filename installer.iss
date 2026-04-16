@@ -1,6 +1,6 @@
 #define MyAppName "SmartCaption"
 #define MyAppVersion "1.0.0"
-#define MyAppPublisher "SmartCaption"
+#define MyAppPublisher "Stpa"
 #define MyAppExeName "SmartCaption.exe"
 
 [Setup]
