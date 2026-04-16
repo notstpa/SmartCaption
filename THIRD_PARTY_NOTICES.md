@@ -1,9 +1,9 @@
 Third-Party Notices
 
-This application includes or depends on third-party open-source software.
-Keep this file with redistributed builds.
+SmartCaption includes open-source software from the projects listed below.
+Please keep this file with redistributed builds of the app.
 
-Included Python libraries used by the app
+Included Libraries
 
 - CustomTkinter 5.2.2
   Project: https://github.com/TomSchimansky/CustomTkinter
@@ -25,16 +25,16 @@ Included Python libraries used by the app
 
 - tkinterdnd2 0.4.3
   Project: https://github.com/Eliav2/tkinterdnd2
-  License: See upstream project/distribution license.
+  License: See the upstream project or distribution license.
 
 - av 17.0.0
   Project: https://github.com/PyAV-Org/PyAV
-  License: See upstream project license.
-  Note: PyAV uses FFmpeg libraries for decoding. Review FFmpeg licensing for your exact redistributed binaries.
+  License: See the upstream project license.
+  Note: PyAV may rely on FFmpeg libraries for media decoding. Review FFmpeg licensing for the exact binaries you redistribute.
 
 - numpy 2.4.4
   Project: https://github.com/numpy/numpy
-  License: See upstream project license.
+  License: See the upstream project license.
 
 - tokenizers 0.22.2
   Project: https://github.com/huggingface/tokenizers
@@ -44,9 +44,9 @@ Included Python libraries used by the app
   Project: https://github.com/tqdm/tqdm
   License: MPL-2.0 and MIT
 
-Important redistribution notes
+Redistribution Notes
 
-- If you redistribute this app, include this file and preserve upstream copyright and license notices.
-- If you bundle downloaded Whisper model files, also review the model repository license and include any required attribution for those model artifacts.
-- If your build bundles FFmpeg-linked binaries through PyAV or another package, verify the exact FFmpeg license obligations for that binary distribution.
-- This file is a practical notice list, not legal advice. For strict compliance, review the exact license text shipped by each dependency version you distribute.
+- Include this file with public releases of SmartCaption.
+- Preserve any required copyright and license notices for bundled dependencies.
+- If you redistribute downloaded Whisper model files, review the model license for any additional attribution requirements.
+- If your final build includes FFmpeg-linked binaries, confirm the exact FFmpeg licensing terms that apply to that distribution.
