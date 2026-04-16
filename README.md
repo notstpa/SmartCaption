@@ -2,7 +2,7 @@
 
 ![SmartCaption](https://i.imgur.com/bKWGXqe.png)
 
-[Download Here](https://github.com/yourusername/SmartCaption/releases)
+[Download Here](https://github.com/notstpa/SmartCaption/releases)
 
 # Features
 - **Subtitle Generation**: Create `.srt` subtitles from audio and video files.
