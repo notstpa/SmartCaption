@@ -33,7 +33,7 @@ Name: "{app}\models"; Permissions: users-modify
 
 [Files]
 Source: "releases\SmartCaption.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "releases\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

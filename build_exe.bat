@@ -56,8 +56,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-copy /Y "THIRD_PARTY_NOTICES.md" "releases\THIRD_PARTY_NOTICES.md" >nul
-copy /Y "releases\SmartCaption.exe" "releases\SmartCaption.v%APP_VERSION%.exe" >nul
 echo.
 echo App build complete.
 echo EXE: releases\SmartCaption.exe

@@ -523,9 +523,6 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         self.configure_ttk_styles()
         self.build_menu_bar()
         self.build_ui()
-        self.log(f"Models folder: {MODEL_DIR}")
-        if MODEL_DIR_MODE == "user":
-            self.log("App folder is not writable, so models will be stored in your user profile.")
         self.after(10, self.show_centered)
 
     def build_menu_bar(self):
@@ -948,22 +945,48 @@ class WhisperApp(ctk.CTk, DnDWrapper):
     def get_repo_id(self, model_name):
         return f"{MODEL_REPO_PREFIX}{model_name}"
 
+    def get_model_dir(self, model_name):
+        return os.path.join(MODEL_DIR, model_name)
+
     def get_model_cache_path(self, model_name):
         safe_repo_name = self.get_repo_id(model_name).replace("/", "--")
         return os.path.join(MODEL_DIR, f"models--{safe_repo_name}")
+
+    def has_model_files(self, model_path):
+        return os.path.isfile(os.path.join(model_path, "model.bin"))
+
+    def get_legacy_snapshot_path(self, model_name):
+        repo_cache_path = self.get_model_cache_path(model_name)
+        snapshots_path = os.path.join(repo_cache_path, "snapshots")
+        if not os.path.isdir(snapshots_path):
+            return None
+
+        try:
+            for entry in os.scandir(snapshots_path):
+                if entry.is_dir() and self.has_model_files(entry.path):
+                    return entry.path
+        except OSError:
+            return None
+
+        return None
+
+    def get_model_load_path(self, model_name):
+        model_dir = self.get_model_dir(model_name)
+        if self.has_model_files(model_dir):
+            return model_dir
+
+        legacy_snapshot_path = self.get_legacy_snapshot_path(model_name)
+        if legacy_snapshot_path:
+            return legacy_snapshot_path
+
+        return None
 
     def detect_installed_models(self):
         installed_models = set()
 
         for model_name in self.available_models:
-            repo_cache_path = self.get_model_cache_path(model_name)
-            snapshots_path = os.path.join(repo_cache_path, "snapshots")
-            if os.path.isdir(snapshots_path):
-                try:
-                    if any(os.scandir(snapshots_path)):
-                        installed_models.add(model_name)
-                except OSError:
-                    pass
+            if self.get_model_load_path(model_name):
+                installed_models.add(model_name)
 
         self.installed_models = installed_models
 
@@ -1057,15 +1080,17 @@ class WhisperApp(ctk.CTk, DnDWrapper):
 
     def _download_worker(self, model_name):
         try:
+            model_dir = self.get_model_dir(model_name)
             snapshot_download(
                 repo_id=self.get_repo_id(model_name),
-                cache_dir=MODEL_DIR,
+                local_dir=model_dir,
                 max_workers=1,
                 tqdm_class=None
             )
 
             self.after(0, self.refresh_model_menu)
             self.after(0, lambda: self.log(f"{model_name} installed ✅"))
+            self.after(0, lambda: self.log(f"Downloaded to: {model_dir}"))
 
         except Exception as err:
             self.after(0, lambda err=err: self.log(f"Error: {err}"))
@@ -1093,8 +1118,13 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             return
 
         model_name = self.model_name.get()
+        model_dir = self.get_model_dir(model_name)
         repo_cache_path = self.get_model_cache_path(model_name)
         deleted = False
+
+        if os.path.isdir(model_dir):
+            self.force_delete(model_dir)
+            deleted = True
 
         if os.path.isdir(repo_cache_path):
             self.force_delete(repo_cache_path)
@@ -1161,11 +1191,16 @@ class WhisperApp(ctk.CTk, DnDWrapper):
 
     def run_whisper(self, subtitle_settings):
         try:
+            model_name = self.model_name.get()
+            model_path = self.get_model_load_path(model_name)
+            if not model_path:
+                self.log(f"{model_name} is not installed. Download it first.")
+                return
+
             model = WhisperModel(
-                self.model_name.get(),
+                model_path,
                 compute_type="int8",
                 device="cpu",
-                download_root=MODEL_DIR,
                 local_files_only=True
             )
             self.log("Model loaded. Processing audio...")
