@@ -31,14 +31,14 @@ SmartCaption-Installer
 # Build from Source
 1. Clone the repo and install dependencies.
    ```shell
-   pip install customtkinter faster-whisper huggingface_hub tkinterdnd2 av ctranslate2 numpy tokenizers tqdm pyinstaller
+   pip install -r requirements.txt
    ```
 2. Install Inno Setup if you want to build the installer.
    - **Note:** The installer build uses `ISCC.exe` from Inno Setup.
    - If you only want the app EXE, you can skip this.
 3. Run the build menu batch script.
    ```shell
-   build_exe.bat
+   packaging\scripts\build_exe.bat
    ```
 4. The output is generated in the `releases/` folder.
 

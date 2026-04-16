@@ -2,7 +2,7 @@
 title SmartCaption Build Menu
 setlocal
 
-cd /d "%~dp0"
+cd /d "%~dp0\..\.."
 
 set APP_NAME=SmartCaption
 set APP_VERSION=1.0.0
@@ -49,7 +49,7 @@ exit /b 0
 call :prepare_dirs
 call :ensure_python_deps
 
-python -m PyInstaller --noconfirm --distpath releases --workpath build\SmartCaption SmartCaption.spec
+python -m PyInstaller --noconfirm --distpath releases --workpath build\SmartCaption packaging\pyinstaller\SmartCaption.spec
 if errorlevel 1 (
     echo.
     echo Build failed.
@@ -82,7 +82,7 @@ if not exist "releases\SmartCaption.exe" (
 )
 
 call :prepare_dirs
-"%ISCC_PATH%" "installer.iss"
+"%ISCC_PATH%" "packaging\installer\installer.iss"
 if errorlevel 1 (
     echo.
     echo Installer build failed.

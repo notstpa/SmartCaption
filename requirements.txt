@@ -1,0 +1,10 @@
+customtkinter
+faster-whisper
+huggingface_hub
+tkinterdnd2
+av
+ctranslate2
+numpy
+tokenizers
+tqdm
+pyinstaller

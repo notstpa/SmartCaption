@@ -13,14 +13,14 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=admin
 DisableProgramGroupPage=yes
-OutputDir=releases
+OutputDir=..\..\releases
 OutputBaseFilename=SmartCaption.v{#MyAppVersion}-Installer
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
-SetupIconFile=icon.ico
+SetupIconFile=..\..\icon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -32,8 +32,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "{app}\models"; Permissions: users-modify
 
 [Files]
-Source: "releases\SmartCaption.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\releases\SmartCaption.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

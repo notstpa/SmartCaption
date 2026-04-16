@@ -2,10 +2,17 @@
 import os
 from PyInstaller.utils.hooks import collect_all
 
-datas = [("THIRD_PARTY_NOTICES.md", "."), ("icon.ico", ".")]
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+datas = [
+    (os.path.join(BASE_DIR, "THIRD_PARTY_NOTICES.md"), "."),
+    (os.path.join(BASE_DIR, "icon.ico"), "."),
+]
 binaries = []
 hiddenimports = []
-icon_path = "icon.ico" if os.path.exists("icon.ico") else None
+icon_path = os.path.join(BASE_DIR, "icon.ico")
+if not os.path.exists(icon_path):
+    icon_path = None
 
 for package_name in ("tkinterdnd2",):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package_name)
@@ -15,7 +22,7 @@ for package_name in ("tkinterdnd2",):
 
 
 a = Analysis(
-    ["app.py"],
+    [os.path.join(BASE_DIR, "main.py")],
     pathex=[],
     binaries=binaries,
     datas=datas,
