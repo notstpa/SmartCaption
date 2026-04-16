@@ -1,6 +1,6 @@
 # SmartCaption v1.0.0
 
-![SmartCaption Screenshot](https://via.placeholder.com/1280x720?text=SmartCaption+Screenshot)
+![SmartCaption Screenshot](https://imgur.com/a/Sqb7O2g)
 
 [Download Here](https://github.com/yourusername/SmartCaption/releases)
 
