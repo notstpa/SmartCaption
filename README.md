@@ -1,6 +1,6 @@
 # SmartCaption v1.0.0
 
-![Stpa Remuxer Screenshot]([https://i.imgur.com/qSW0mps.png](https://i.imgur.com/gc2DcH1.png))
+![Stpa Remuxer Screenshot](https://i.imgur.com/gc2DcH1.png))
 
 [Download Here](https://github.com/yourusername/SmartCaption/releases)
 
