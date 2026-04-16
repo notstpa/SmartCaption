@@ -10,10 +10,7 @@ ENV/
 
 # Build and packaging output
 build/
-dist/
-installer_output/
 releases/
-*.spec
 
 # Downloaded/local model caches
 models/*

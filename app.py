@@ -130,6 +130,13 @@ def get_app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_resource_path(filename):
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, filename)
+
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+
+
 def get_user_data_dir():
     local_appdata = os.environ.get("LOCALAPPDATA")
     if local_appdata:
@@ -164,7 +171,7 @@ def resolve_model_dir(app_dir):
 
 APP_DIR = get_app_dir()
 MODEL_DIR, MODEL_DIR_MODE = resolve_model_dir(APP_DIR)
-APP_ICON_PATH = os.path.join(APP_DIR, "icon.ico")
+APP_ICON_PATH = get_resource_path("icon.ico")
 
 os.environ["HF_HOME"] = MODEL_DIR
 os.environ["HF_HUB_CACHE"] = MODEL_DIR

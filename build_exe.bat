@@ -42,7 +42,6 @@ exit /b 0
 :prepare_dirs
 if not exist "build" mkdir "build"
 if not exist "build\SmartCaption" mkdir "build\SmartCaption"
-if not exist "dist" mkdir "dist"
 if not exist "releases" mkdir "releases"
 exit /b 0
 
@@ -50,19 +49,18 @@ exit /b 0
 call :prepare_dirs
 call :ensure_python_deps
 
-python -m PyInstaller --noconfirm SmartCaption.spec
+python -m PyInstaller --noconfirm --distpath releases --workpath build\SmartCaption SmartCaption.spec
 if errorlevel 1 (
     echo.
     echo Build failed.
     exit /b 1
 )
 
-copy /Y "THIRD_PARTY_NOTICES.md" "dist\THIRD_PARTY_NOTICES.md" >nul
-copy /Y "dist\SmartCaption.exe" "releases\SmartCaption.v%APP_VERSION%.exe" >nul
-copy /Y "dist\THIRD_PARTY_NOTICES.md" "releases\THIRD_PARTY_NOTICES.md" >nul
+copy /Y "THIRD_PARTY_NOTICES.md" "releases\THIRD_PARTY_NOTICES.md" >nul
+copy /Y "releases\SmartCaption.exe" "releases\SmartCaption.v%APP_VERSION%.exe" >nul
 echo.
 echo App build complete.
-echo EXE: dist\SmartCaption.exe
+echo EXE: releases\SmartCaption.exe
 exit /b 0
 
 :build_installer
@@ -79,13 +77,12 @@ if "%ISCC_PATH%"=="" (
     exit /b 1
 )
 
-if not exist "dist\SmartCaption.exe" (
+if not exist "releases\SmartCaption.exe" (
     echo.
-    echo dist\SmartCaption.exe not found. Build the app first.
+    echo releases\SmartCaption.exe not found. Build the app first.
     exit /b 1
 )
 
-if not exist "installer_output" mkdir "installer_output"
 call :prepare_dirs
 "%ISCC_PATH%" "installer.iss"
 if errorlevel 1 (
@@ -94,7 +91,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-copy /Y "installer_output\SmartCaptionSetup.exe" "releases\SmartCaption.v%APP_VERSION%-Installer.exe" >nul
 echo.
 echo Installer build complete.
 echo Installer: releases\SmartCaption.v%APP_VERSION%-Installer.exe
@@ -142,9 +138,7 @@ echo ========================================
 echo   Cleaning Build Folders
 echo ========================================
 if exist build rmdir /s /q build 2>nul
-if exist dist rmdir /s /q dist 2>nul
 if exist releases rmdir /s /q releases 2>nul
-if exist installer_output rmdir /s /q installer_output 2>nul
 echo.
 echo Clean complete.
 echo.
