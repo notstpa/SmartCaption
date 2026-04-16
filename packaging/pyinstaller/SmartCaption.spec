@@ -2,7 +2,7 @@
 import os
 from PyInstaller.utils.hooks import collect_all
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+BASE_DIR = os.path.abspath(os.getcwd())
 
 datas = [
     (os.path.join(BASE_DIR, "THIRD_PARTY_NOTICES.md"), "."),
