@@ -1,6 +1,6 @@
 # SmartCaption v1.0.0
 
-![SmartCaption Screenshot](https://imgur.com/a/Sqb7O2g)
+![Stpa Remuxer Screenshot]([https://i.imgur.com/qSW0mps.png](https://i.imgur.com/gc2DcH1.png))
 
 [Download Here](https://github.com/yourusername/SmartCaption/releases)
 
@@ -15,8 +15,6 @@
 - **Advanced Controls**: Tune beam size, no-speech threshold, and context handling.
 - **Drag and Drop**: Drop supported media files straight into the window.
 - **Installer Included**: Build a Windows installer for a simpler setup experience.
-
-![SmartCaption Screenshot](https://via.placeholder.com/1280x720?text=SmartCaption+UI)
 
 # Versions
 
