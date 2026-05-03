@@ -1,8 +1,13 @@
-# SmartCaption v1.0.0
+# SmartCaption v2.0.0
 
-![SmartCaption](https://i.imgur.com/bKWGXqe.png)
+![SmartCaption](https://i.imgur.com/atCxoSp.png)
 
 [Download Here](https://github.com/notstpa/SmartCaption/releases)
+
+# New This Update
+- **Updated UI**: Refreshed interface with cleaner controls, improved spacing, and a smoother workflow.
+- **Accuracy Tweaks**: Improved transcription settings and subtitle generation behavior for better results.
+- **More Consistent Subtitle Output**: Better subtitle timing and splitting behavior for cleaner `.srt` files.
 
 # Features
 - **Subtitle Generation**: Create `.srt` subtitles from audio and video files.
@@ -32,26 +37,3 @@ SmartCaption-Installer
 1. Clone the repo and install dependencies.
    ```shell
    pip install -r requirements.txt
-   ```
-2. Install Inno Setup if you want to build the installer.
-   - **Note:** The installer build uses `ISCC.exe` from Inno Setup.
-   - If you only want the app EXE, you can skip this.
-3. Run the build menu batch script.
-   ```shell
-   packaging\scripts\build_exe.bat
-   ```
-4. The output is generated in the `releases/` folder.
-
-## Build Options
-The batch menu lets you build:
-- App EXE only
-- Installer only
-- App EXE + Installer
-- Clean build folders
-
-Use the batch menu for local builds and keep the repo source files clean.
-
-## Notes
-- Supported formats include `mp3`, `wav`, `m4a`, `flac`, `aac`, `ogg`, `wma`, `mp4`, `mkv`, `mov`, `avi`, `webm`, `mpeg`, `mpg`, and `m4v`.
-- Models are stored in the app's `models` folder when writable. If not, the app falls back to `%LOCALAPPDATA%\SmartCaption\models`.
-- The installer is configured to create a writable `models` folder inside the installed app directory.
