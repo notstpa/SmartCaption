@@ -4,8 +4,10 @@ setlocal
 
 cd /d "%~dp0\..\.."
 
-set APP_NAME=SmartCaption
-set APP_VERSION=1.0.0
+set "APP_NAME=SmartCaption"
+set "DEFAULT_APP_VERSION=1.0.0"
+set "VERSION_FILE=packaging\scripts\last_version.txt"
+call :load_saved_version
 
 :menu
 cls
@@ -28,6 +30,26 @@ if "%choice%"=="3" goto build_all
 if "%choice%"=="4" goto clean_folders
 if "%choice%"=="5" goto end
 goto menu
+
+:load_saved_version
+set "APP_VERSION=%DEFAULT_APP_VERSION%"
+if exist "%VERSION_FILE%" (
+    set /p APP_VERSION=<"%VERSION_FILE%"
+)
+if "%APP_VERSION%"=="" set "APP_VERSION=%DEFAULT_APP_VERSION%"
+exit /b 0
+
+:prompt_app_version
+call :load_saved_version
+echo.
+echo Current saved version: %APP_VERSION%
+set "VERSION_INPUT="
+set /p VERSION_INPUT="Enter version number [%APP_VERSION%]: "
+if not "%VERSION_INPUT%"=="" set "APP_VERSION=%VERSION_INPUT%"
+if "%APP_VERSION%"=="" set "APP_VERSION=%DEFAULT_APP_VERSION%"
+> "%VERSION_FILE%" echo %APP_VERSION%
+echo Version set to %APP_VERSION%.
+exit /b 0
 
 :ensure_python_deps
 python -m pip install pyinstaller PyQt6 faster-whisper huggingface_hub av ctranslate2 numpy tokenizers tqdm
@@ -82,7 +104,7 @@ if not exist "releases\SmartCaption.exe" (
 )
 
 call :prepare_dirs
-"%ISCC_PATH%" "packaging\installer\installer.iss"
+"%ISCC_PATH%" /DMyAppVersion="%APP_VERSION%" "packaging\installer\installer.iss"
 if errorlevel 1 (
     echo.
     echo Installer build failed.
@@ -99,6 +121,7 @@ cls
 echo ========================================
 echo   Building App EXE
 echo ========================================
+call :prompt_app_version
 call :build_app
 echo.
 pause
@@ -109,6 +132,7 @@ cls
 echo ========================================
 echo   Building Installer
 echo ========================================
+call :prompt_app_version
 call :build_installer
 echo.
 pause
@@ -119,6 +143,7 @@ cls
 echo ========================================
 echo   Building App + Installer
 echo ========================================
+call :prompt_app_version
 call :build_app
 if errorlevel 1 (
     echo.
