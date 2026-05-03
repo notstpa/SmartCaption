@@ -1,17 +1,32 @@
 import os
 import sys
-import threading
 import shutil
 import stat
-import tkinter as tk
-from tkinter import ttk
-import customtkinter as ctk
-from tkinter import filedialog, messagebox
+
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenuBar,
+    QPushButton,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
-from tkinterdnd2 import DND_FILES
-from tkinterdnd2.TkinterDnD import DnDWrapper, _require
 
 APP_NAME = "SmartCaption"
 MODEL_REPO_PREFIX = "Systran/faster-whisper-"
@@ -172,6 +187,8 @@ def resolve_model_dir(app_dir):
 APP_DIR = get_app_dir()
 MODEL_DIR, MODEL_DIR_MODE = resolve_model_dir(APP_DIR)
 APP_ICON_PATH = get_resource_path("icon.ico")
+DROPDOWN_ARROW_PATH = get_resource_path("dropdown_arrow.svg")
+CHECKBOX_CHECK_PATH = get_resource_path("checkbox_check.svg")
 
 os.environ["HF_HOME"] = MODEL_DIR
 os.environ["HF_HUB_CACHE"] = MODEL_DIR
@@ -180,278 +197,285 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 disable_progress_bars()
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+
+class StateValue:
+    def __init__(self, value=None):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
 
 
-class OutputConflictDialog(ctk.CTkToplevel):
+def set_window_icon(window):
+    if os.path.exists(APP_ICON_PATH):
+        window.setWindowIcon(QIcon(APP_ICON_PATH))
+
+
+class FunctionWorker(QObject):
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+
+    def run(self):
+        try:
+            self.function()
+        except Exception as err:
+            self.error.emit(f"Error: {err}")
+        finally:
+            self.finished.emit()
+
+
+class DropLineEdit(QLineEdit):
+    file_dropped = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.file_dropped.emit(urls[0].toLocalFile())
+            event.acceptProposedAction()
+
+
+class DropWidget(QWidget):
+    file_dropped = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.file_dropped.emit(urls[0].toLocalFile())
+            event.acceptProposedAction()
+
+
+class OutputConflictDialog(QDialog):
     def __init__(self, parent, file_path):
         super().__init__(parent)
         self.choice = None
         self.file_path = file_path
 
-        self.title("Output File Exists")
-        self.geometry("520x220")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
+        self.setWindowTitle("Output File Exists")
+        set_window_icon(self)
+        self.setFixedSize(520, 220)
+        self.setModal(True)
 
-        self.grid_columnconfigure(0, weight=1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
-        prompt = ctk.CTkLabel(
-            self,
-            text=(
-                "The output file already exists.\n\n"
-                f"{os.path.basename(file_path)}\n\n"
-                "Do you want to overwrite it, create a renamed copy, or cancel?"
-            ),
-            justify="left",
-            anchor="w",
-            wraplength=460
+        prompt = QLabel(
+            "The output file already exists.\n\n"
+            f"{os.path.basename(file_path)}\n\n"
+            "Do you want to overwrite it, create a renamed copy, or cancel?"
         )
-        prompt.grid(row=0, column=0, padx=20, pady=(20, 16), sticky="ew")
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
 
-        button_row = ctk.CTkFrame(self, fg_color="transparent")
-        button_row.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="ew")
-        button_row.grid_columnconfigure((0, 1, 2), weight=1)
-
-        overwrite_btn = ctk.CTkButton(button_row, text="Overwrite", command=lambda: self.finish("overwrite"))
-        overwrite_btn.grid(row=0, column=0, padx=(0, 8), sticky="ew")
-
-        rename_btn = ctk.CTkButton(button_row, text="Rename", command=lambda: self.finish("rename"))
-        rename_btn.grid(row=0, column=1, padx=8, sticky="ew")
-
-        cancel_btn = ctk.CTkButton(button_row, text="Cancel", command=lambda: self.finish("cancel"))
-        cancel_btn.grid(row=0, column=2, padx=(8, 0), sticky="ew")
-
-        self.protocol("WM_DELETE_WINDOW", lambda: self.finish("cancel"))
-        self.after(10, lambda: self.finalize_dialog(parent))
-
-    def finalize_dialog(self, parent):
-        parent.center_window(self)
-        self.focus()
+        button_row = QHBoxLayout()
+        overwrite_btn = QPushButton("Overwrite")
+        rename_btn = QPushButton("Rename")
+        cancel_btn = QPushButton("Cancel")
+        overwrite_btn.clicked.connect(lambda: self.finish("overwrite"))
+        rename_btn.clicked.connect(lambda: self.finish("rename"))
+        cancel_btn.clicked.connect(lambda: self.finish("cancel"))
+        button_row.addWidget(overwrite_btn)
+        button_row.addWidget(rename_btn)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
 
     def finish(self, choice):
         self.choice = choice
-        self.destroy()
+        self.accept()
+
+    def reject(self):
+        self.choice = "cancel"
+        super().reject()
 
 
-class HelpTooltip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip_window = None
-        self.hide_job = None
+class InfoDialog(QDialog):
+    """A themed info dialog that matches the app's dark theme."""
 
-        self.widget.bind("<Enter>", self.show)
-        self.widget.bind("<Leave>", self.schedule_hide)
-        self.widget.bind("<ButtonPress>", self.hide)
-        self.widget.bind("<Destroy>", self.hide)
+    def __init__(self, parent, title, text):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        set_window_icon(self)
+        self.setModal(True)
+        self.resize(*self.get_dialog_size(text, parent))
 
-    def show(self, _event=None):
-        if self.hide_job is not None:
-            self.widget.after_cancel(self.hide_job)
-            self.hide_job = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
 
-        if self.tip_window is not None:
-            return
+        shell = QFrame()
+        shell.setObjectName("card")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(20, 20, 20, 16)
+        shell_layout.setSpacing(10)
 
-        x = self.widget.winfo_rootx() + self.widget.winfo_width() + 10
-        y = self.widget.winfo_rooty() - 2
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(text)
+        shell_layout.addWidget(body, 1)
 
-        self.tip_window = ctk.CTkToplevel(self.widget)
-        self.tip_window.overrideredirect(True)
-        self.tip_window.attributes("-topmost", True)
-        self.tip_window.geometry(f"+{x}+{y}")
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(100)
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn)
+        shell_layout.addLayout(close_row)
 
-        label = ctk.CTkLabel(
-            self.tip_window,
-            text=self.text,
-            justify="left",
-            anchor="w",
-            wraplength=220,
-            corner_radius=8,
-            fg_color=("#f4f4f4", "#1f1f1f")
-        )
-        label.pack(padx=1, pady=1)
-        self.tip_window.bind("<Leave>", self.hide)
-        self.tip_window.bind("<ButtonPress>", self.hide)
+        layout.addWidget(shell)
 
-    def schedule_hide(self, _event=None):
-        if self.hide_job is not None:
-            self.widget.after_cancel(self.hide_job)
-        self.hide_job = self.widget.after(80, self.hide)
-
-    def hide(self, _event=None):
-        if self.hide_job is not None:
-            self.widget.after_cancel(self.hide_job)
-            self.hide_job = None
-        if self.tip_window is not None:
-            self.tip_window.destroy()
-            self.tip_window = None
+    def get_dialog_size(self, text, parent):
+        line_count = text.count("\n") + 1
+        width = 560
+        screen_height = parent.screen().availableGeometry().height()
+        height = min(max(260, 150 + (line_count * 18)), int(screen_height * 0.75))
+        return width, height
 
 
-class AdvancedOptionsDialog(ctk.CTkToplevel):
+class AdvancedOptionsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
 
-        self.title("Advanced Options")
-        self.geometry("640x340")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
+        self.setWindowTitle("Advanced Options")
+        set_window_icon(self)
+        self.setFixedSize(640, 340)
+        self.setModal(True)
 
-        self.grid_columnconfigure(0, weight=1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(0)
 
-        shell = ctk.CTkFrame(self, corner_radius=14)
-        shell.grid(row=0, column=0, padx=18, pady=18, sticky="nsew")
-        shell.grid_columnconfigure(0, weight=1)
+        shell = QFrame()
+        shell.setObjectName("card")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(18, 16, 18, 16)
+        shell_layout.setSpacing(10)
 
-        header = ctk.CTkFrame(shell, fg_color="transparent")
-        header.grid(row=0, column=0, padx=16, pady=(14, 4), sticky="ew")
-        header.grid_columnconfigure(0, weight=1)
+        title = QLabel("Advanced Options")
+        title.setObjectName("title")
+        shell_layout.addWidget(title)
 
-        title = ctk.CTkLabel(
-            header,
-            text="Advanced Options",
-            font=ctk.CTkFont(size=18, weight="bold")
-        )
-        title.grid(row=0, column=0, sticky="w")
+        info_label = QLabel("A few expert controls for troubleshooting accuracy and pacing.")
+        info_label.setObjectName("muted")
+        shell_layout.addWidget(info_label)
 
-        info_label = ctk.CTkLabel(
-            header,
-            text="A few expert controls for troubleshooting accuracy and pacing.",
-            justify="left",
-            anchor="w",
-            text_color=("gray35", "gray70")
-        )
-        info_label.grid(row=1, column=0, pady=(4, 0), sticky="w")
-
-        container = ctk.CTkFrame(shell, corner_radius=12)
-        container.grid(row=1, column=0, padx=16, pady=(8, 10), sticky="nsew")
-        container.grid_columnconfigure(0, weight=1)
+        container = QFrame()
+        container.setObjectName("innerCard")
+        container_layout = QGridLayout(container)
+        container_layout.setContentsMargins(18, 14, 18, 14)
+        container_layout.setHorizontalSpacing(12)
+        container_layout.setVerticalSpacing(10)
 
         self.beam_size_menu = self.add_option_row(
-            container,
+            container_layout,
             row=0,
             title="Beam Size",
             help_text="Beam size controls how many candidate transcriptions Whisper explores. Higher values usually help difficult audio, but increase processing time.",
             values=["1", "3", "5", "8", "10"],
-            variable=parent.beam_size
+            variable=parent.beam_size,
         )
-
         self.no_speech_menu = self.add_option_row(
-            container,
+            container_layout,
             row=1,
             title="No Speech Threshold",
             help_text="Higher values make Whisper more likely to skip quiet or uncertain sections. Lower values keep more borderline speech, which can help with soft voices but may add junk captions.",
             values=["0.3", "0.6", "0.8", "1.0"],
-            variable=parent.no_speech_threshold
+            variable=parent.no_speech_threshold,
         )
-
         self.add_switch_row(
-            container,
+            container_layout,
             row=2,
             title="Condition On Previous Text",
             help_text="When enabled, the model uses previous text as context for the next chunk. This can improve continuity, but sometimes carries mistakes forward.",
-            variable=parent.condition_on_previous_text
+            variable=parent.condition_on_previous_text,
         )
+        shell_layout.addWidget(container)
 
-        footer_note = ctk.CTkLabel(
-            shell,
-            text="Defaults are usually the best choice for normal subtitle generation.",
-            justify="left",
-            anchor="w",
-            text_color=("gray35", "gray70")
-        )
-        footer_note.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
+        footer_note = QLabel("Defaults are usually the best choice for normal subtitle generation.")
+        footer_note.setObjectName("muted")
+        shell_layout.addWidget(footer_note)
 
-        button_row = ctk.CTkFrame(shell, fg_color="transparent")
-        button_row.grid(row=3, column=0, padx=16, pady=(0, 14), sticky="ew")
-        button_row.grid_columnconfigure((0, 1), weight=1)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        reset_button = QPushButton("Reset Defaults")
+        close_button = QPushButton("Close")
+        reset_button.clicked.connect(self.reset_defaults)
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(reset_button)
+        button_row.addWidget(close_button)
+        shell_layout.addLayout(button_row)
 
-        reset_button = ctk.CTkButton(button_row, text="Reset Defaults", command=self.reset_defaults)
-        reset_button.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        layout.addWidget(shell)
 
-        close_button = ctk.CTkButton(button_row, text="Close", command=self.destroy)
-        close_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")
+    def add_option_row(self, layout, row, title, help_text, values, variable):
+        label_row = QHBoxLayout()
+        label_row.setContentsMargins(0, 0, 0, 0)
+        label_row.setSpacing(8)
+        title_label = QLabel(title)
+        title_label.setObjectName("bold")
+        help_button = QPushButton("?")
+        help_button.setObjectName("helpButton")
+        help_button.setToolTip(help_text)
+        help_button.setFixedSize(22, 22)
+        label_row.addWidget(title_label)
+        label_row.addWidget(help_button)
+        label_row.addStretch(1)
+        layout.addLayout(label_row, row, 0)
 
-        bottom_spacer = ctk.CTkFrame(shell, fg_color="transparent", height=12)
-        bottom_spacer.grid(row=4, column=0, sticky="ew")
-
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
-        self.after(10, lambda: self.finalize_dialog(parent))
-
-    def finalize_dialog(self, parent):
-        parent.center_window(self)
-        self.focus()
-
-    def add_option_row(self, parent, row, title, help_text, values, variable):
-        row_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        row_frame.grid(row=row, column=0, padx=18, pady=(12 if row == 0 else 6, 6), sticky="ew")
-        row_frame.grid_columnconfigure(0, weight=1)
-        row_frame.grid_columnconfigure(1, minsize=140)
-
-        label_row = ctk.CTkFrame(row_frame, fg_color="transparent")
-        label_row.grid(row=0, column=0, sticky="w")
-
-        title_label = ctk.CTkLabel(label_row, text=title, font=ctk.CTkFont(size=14, weight="bold"))
-        title_label.grid(row=0, column=0, sticky="w")
-
-        help_button = ctk.CTkButton(
-            label_row,
-            text="?",
-            width=22,
-            height=22,
-            corner_radius=11,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=("gray78", "gray24"),
-            hover_color=("gray70", "gray30"),
-            text_color=("gray15", "white")
-        )
-        help_button.grid(row=0, column=1, padx=(8, 0), sticky="w")
-        HelpTooltip(help_button, help_text)
-
-        value_var = ctk.StringVar(value=self.format_option_value(variable.get()))
-        option_menu = ctk.CTkOptionMenu(
-            row_frame,
-            values=values,
-            variable=value_var,
-            width=120,
-            command=lambda selected, var=variable: self.on_option_change(var, selected)
-        )
-        option_menu.grid(row=0, column=1, padx=(10, 0), pady=(0, 0), sticky="e")
+        option_menu = QComboBox()
+        option_menu.addItems(values)
+        option_menu.setCurrentText(self.format_option_value(variable.get()))
+        option_menu.currentTextChanged.connect(lambda selected, var=variable: self.on_option_change(var, selected))
+        option_menu.setFixedWidth(120)
+        layout.addWidget(option_menu, row, 1, alignment=Qt.AlignmentFlag.AlignVCenter)
         return option_menu
 
-    def add_switch_row(self, parent, row, title, help_text, variable):
-        row_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        row_frame.grid(row=row, column=0, padx=18, pady=6, sticky="ew")
-        row_frame.grid_columnconfigure(0, weight=1)
-        row_frame.grid_columnconfigure(1, minsize=140)
+    def add_switch_row(self, layout, row, title, help_text, variable):
+        label_row = QHBoxLayout()
+        label_row.setContentsMargins(0, 0, 0, 0)
+        label_row.setSpacing(8)
+        title_label = QLabel(title)
+        title_label.setObjectName("bold")
+        help_button = QPushButton("?")
+        help_button.setObjectName("helpButton")
+        help_button.setToolTip(help_text)
+        help_button.setFixedSize(22, 22)
+        label_row.addWidget(title_label)
+        label_row.addWidget(help_button)
+        label_row.addStretch(1)
+        layout.addLayout(label_row, row, 0)
 
-        label_row = ctk.CTkFrame(row_frame, fg_color="transparent")
-        label_row.grid(row=0, column=0, sticky="w")
-
-        title_label = ctk.CTkLabel(label_row, text=title, font=ctk.CTkFont(size=14, weight="bold"))
-        title_label.grid(row=0, column=0, sticky="w")
-
-        help_button = ctk.CTkButton(
-            label_row,
-            text="?",
-            width=22,
-            height=22,
-            corner_radius=11,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=("gray78", "gray24"),
-            hover_color=("gray70", "gray30"),
-            text_color=("gray15", "white")
-        )
-        help_button.grid(row=0, column=1, padx=(8, 0), sticky="w")
-        HelpTooltip(help_button, help_text)
-
-        toggle = ctk.CTkSwitch(row_frame, text="", variable=variable)
-        toggle.grid(row=0, column=1, padx=(10, 2), pady=(0, 0), sticky="e")
+        toggle = QCheckBox()
+        toggle.setChecked(bool(variable.get()))
+        toggle.toggled.connect(variable.set)
+        layout.addWidget(toggle, row, 1, alignment=Qt.AlignmentFlag.AlignRight)
 
     def format_option_value(self, value):
         if isinstance(value, float):
@@ -459,7 +483,8 @@ class AdvancedOptionsDialog(ctk.CTkToplevel):
         return str(value)
 
     def on_option_change(self, variable, selected_value):
-        if isinstance(variable, ctk.DoubleVar):
+        current_value = variable.get()
+        if isinstance(current_value, float):
             variable.set(float(selected_value))
         else:
             variable.set(int(selected_value))
@@ -469,46 +494,48 @@ class AdvancedOptionsDialog(ctk.CTkToplevel):
         self.parent.beam_size.set(defaults["beam_size"])
         self.parent.no_speech_threshold.set(defaults["no_speech_threshold"])
         self.parent.condition_on_previous_text.set(defaults["condition_on_previous_text"])
-        self.destroy()
+        self.accept()
         self.parent.open_advanced_options()
 
 
-class WhisperApp(ctk.CTk, DnDWrapper):
+class WhisperApp(QMainWindow):
+    log_requested = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
 
-        if os.path.exists(APP_ICON_PATH):
-            try:
-                self.iconbitmap(APP_ICON_PATH)
-            except Exception:
-                pass
+        set_window_icon(self)
+        self.setWindowTitle(APP_NAME)
+        self.resize(900, 600)
+        self.setMinimumSize(900, 600)
 
-        self.title(APP_NAME)
-        self.geometry("900x600")
-        self.withdraw()
-
-        self.input_path = ctk.StringVar()
-        self.output_path = ctk.StringVar()
-        self.model_name = ctk.StringVar(value="small")
-        self.model_display = ctk.StringVar()
-        self.use_word_timestamps = ctk.BooleanVar(value=True)
-        self.remove_punctuation = ctk.BooleanVar(value=False)
-        self.text_case = ctk.StringVar(value="Normal")
-        self.language_display = ctk.StringVar()
-        self.max_words_per_subtitle = ctk.StringVar(value="8")
-        self.max_chars_per_line = ctk.StringVar(value="42")
-        self.beam_size = ctk.IntVar(value=5)
-        self.no_speech_threshold = ctk.DoubleVar(value=0.8)
-        self.condition_on_previous_text = ctk.BooleanVar(value=False)
+        self.input_path = StateValue("")
+        self.output_path = StateValue("")
+        self.model_name = StateValue("small")
+        self.model_display = StateValue("")
+        self.use_word_timestamps = StateValue(True)
+        self.remove_punctuation = StateValue(False)
+        self.text_case = StateValue("Normal")
+        self.language_display = StateValue("")
+        self.max_words_per_subtitle = StateValue("8")
+        self.max_chars_per_line = StateValue("42")
+        self.beam_size = StateValue(5)
+        self.no_speech_threshold = StateValue(0.8)
+        self.condition_on_previous_text = StateValue(False)
+        self.preset = StateValue("Normal")
+        self.pause_threshold = StateValue(0.5)
+        self.max_subtitle_duration = StateValue(3.2)
+        self.vad_silence_ms = StateValue(700)
+        self.break_on_punctuation_immediate = StateValue(False)
 
         self.available_models = ["tiny", "base", "small", "medium", "large-v3"]
         self.model_display_map = {}
         self.installed_models = set()
         self.spinner_frames = ["|", "/", "-", "\\"]
         self.spinner_index = 0
-        self.spinner_job = None
         self.spinner_message = "Idle"
         self.advanced_dialog = None
+        self.worker_threads = []
         self.language_display_map = {
             f"{SUPPORTED_LANGUAGE_NAMES[code]} ({code})": code for code in sorted(
                 SUPPORTED_LANGUAGE_NAMES,
@@ -519,409 +546,693 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         self.is_downloading = False
         self.is_transcribing = False
 
-        _require(self)
-        self.configure_ttk_styles()
+        self.spinner_timer = QTimer(self)
+        self.spinner_timer.setInterval(120)
+        self.spinner_timer.timeout.connect(self.schedule_spinner)
+        self.log_requested.connect(self._append_log)
+
         self.build_menu_bar()
         self.build_ui()
-        self.after(10, self.show_centered)
+        self.apply_dark_theme()
 
     def build_menu_bar(self):
-        self.menu_bar = ctk.CTkFrame(self, fg_color="#242424", corner_radius=0, height=28)
-        self.menu_bar.grid(row=0, column=0, sticky="ew")
-        self.menu_bar.grid_columnconfigure(99, weight=1)
-        self.menu_bar.grid_propagate(False)
+        menu_bar = QMenuBar(self)
+        self.setMenuBar(menu_bar)
 
-        self.options_popup_menu = tk.Menu(self, tearoff=0)
-        self.options_popup_menu.add_command(label="Advanced Options", command=self.open_advanced_options)
+        options_menu = menu_bar.addMenu("Options")
+        advanced_action = QAction("Advanced Options", self)
+        advanced_action.triggered.connect(self.open_advanced_options)
+        options_menu.addAction(advanced_action)
 
-        self.help_popup_menu = tk.Menu(self, tearoff=0)
-        self.help_popup_menu.add_command(label="Best Accuracy Settings", command=self.show_best_accuracy_info)
-        self.help_popup_menu.add_command(label="Accuracy Tips", command=self.show_accuracy_tips)
-        self.help_popup_menu.add_separator()
-        self.help_popup_menu.add_command(label="Supported Formats", command=self.show_supported_formats)
-        self.help_popup_menu.add_command(label="Credits", command=self.show_credits_info)
+        help_menu = menu_bar.addMenu("Help")
+        best_accuracy_action = QAction("Best Accuracy Settings", self)
+        best_accuracy_action.triggered.connect(self.show_best_accuracy_info)
+        accuracy_tips_action = QAction("Accuracy Tips", self)
+        accuracy_tips_action.triggered.connect(self.show_accuracy_tips)
+        supported_formats_action = QAction("Supported Formats", self)
+        supported_formats_action.triggered.connect(self.show_supported_formats)
+        credits_action = QAction("Credits", self)
+        credits_action.triggered.connect(self.show_credits_info)
+        help_menu.addAction(best_accuracy_action)
+        help_menu.addAction(accuracy_tips_action)
+        help_menu.addSeparator()
+        help_menu.addAction(supported_formats_action)
+        help_menu.addAction(credits_action)
 
-        self.options_menu_button = ctk.CTkButton(
-            self.menu_bar,
-            text="Options",
-            width=64,
-            height=24,
-            corner_radius=4,
-            fg_color="transparent",
-            text_color="#f2f2f2",
-            hover_color="#343638",
-            command=lambda: self.show_popup_menu(self.options_popup_menu, self.options_menu_button)
+    def apply_dark_theme(self):
+        dropdown_arrow_path = DROPDOWN_ARROW_PATH.replace("\\", "/")
+        checkbox_check_path = CHECKBOX_CHECK_PATH.replace("\\", "/")
+        stylesheet = (
+            """
+            * {
+                font-family: "Segoe UI", "Arial", sans-serif;
+                font-size: 13px;
+            }
+            QMainWindow, QDialog, QWidget#centralWidget {
+                background: #17191d;
+                color: #edf2f7;
+                font-size: 13px;
+            }
+            QWidget {
+                color: #edf2f7;
+                font-size: 13px;
+            }
+            QMenuBar {
+                background: #20242a;
+                color: #edf2f7;
+                padding: 2px;
+                min-height: 24px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 5px 10px;
+                border-radius: 4px;
+            }
+            QMenuBar::item:selected {
+                background: #2b3138;
+            }
+            QMenu {
+                background: #252b32;
+                color: #edf2f7;
+                border: 1px solid #3b4450;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 30px 6px 14px;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #2a75ad;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #3b4450;
+                margin: 4px 6px;
+            }
+            QFrame {
+                background: #24282e;
+                border-radius: 8px;
+            }
+            QFrame#card {
+                background: #24282e;
+                border-radius: 14px;
+            }
+            QFrame#innerCard {
+                background: #2c3239;
+                border-radius: 12px;
+            }
+            QLabel {
+                background: transparent;
+            }
+            QLabel#title {
+                font-size: 18px;
+                font-weight: 700;
+                color: #ffffff;
+            }
+            QLabel#sectionLabel {
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QLabel#bold {
+                font-weight: 700;
+                color: #ffffff;
+            }
+            QLabel#muted {
+                color: #a8b2be;
+            }
+            QLabel#statusLabel {
+                color: #d6dee8;
+                background: #252b32;
+                border-radius: 6px;
+                padding: 6px 8px;
+            }
+            QPushButton {
+                background: #2a75ad;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 7px 12px;
+                min-height: 18px;
+            }
+            QPushButton:hover {
+                background: #3283c0;
+            }
+            QPushButton:pressed {
+                background: #216394;
+            }
+            QPushButton:disabled {
+                background: #3b434d;
+                color: #8d98a5;
+            }
+            QPushButton#helpButton {
+                background: #3b434d;
+                color: #dce4ee;
+                border: 1px solid #505b68;
+                border-radius: 11px;
+                padding: 0;
+                min-height: 0;
+                font-weight: 700;
+            }
+            QPushButton#helpButton:hover {
+                background: #46515e;
+                border: 1px solid #637181;
+            }
+            QPushButton#helpButton:pressed {
+                background: #323a43;
+            }
+            QLineEdit, QComboBox, QTextEdit {
+                background: #2f353d;
+                color: #edf2f7;
+                border: 1px solid #46515d;
+                border-radius: 6px;
+                padding: 6px 8px;
+                selection-background-color: #2a75ad;
+                selection-color: #ffffff;
+            }
+            QLineEdit:hover, QComboBox:hover, QTextEdit:hover {
+                border: 1px solid #586573;
+                background: #343b44;
+            }
+            QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
+                border: 1px solid #4694cd;
+                background: #343b44;
+            }
+            QLineEdit, QComboBox {
+                min-height: 20px;
+            }
+            QComboBox {
+                padding: 6px 34px 6px 8px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 30px;
+                border-left: 1px solid #46515d;
+                border-top-right-radius: 6px;
+                border-bottom-right-radius: 6px;
+                background: #343b44;
+            }
+            QComboBox::drop-down:hover {
+                background: #3c4651;
+            }
+            QComboBox::down-arrow {
+                image: url("__DROPDOWN_ARROW_PATH__");
+                width: 10px;
+                height: 6px;
+                margin: 0;
+            }
+            QComboBox:disabled, QLineEdit:disabled, QTextEdit:disabled {
+                background: #293039;
+                color: #8d98a5;
+                border: 1px solid #3c4651;
+            }
+            QComboBox QAbstractItemView {
+                background: #2f353d;
+                color: #edf2f7;
+                border: 1px solid #46515d;
+                border-radius: 6px;
+                selection-background-color: #2a75ad;
+                selection-color: #ffffff;
+                outline: 0;
+                padding: 4px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 22px;
+                padding: 4px 8px;
+            }
+            QTextEdit {
+                padding: 8px;
+            }
+            QTextEdit:read-only {
+                background: #2f353d;
+            }
+            QCheckBox {
+                background: transparent;
+                spacing: 8px;
+                padding: 4px 0;
+                min-height: 20px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #6b7786;
+                background: #2f353d;
+            }
+            QCheckBox::indicator:hover {
+                border: 1px solid #818f9f;
+                background: #37404a;
+            }
+            QCheckBox::indicator:checked {
+                background: #2a75ad;
+                border: 1px solid #4694cd;
+                image: url("__CHECKBOX_CHECK_PATH__");
+            }
+            QCheckBox::indicator:disabled {
+                background: #303842;
+                border: 1px solid #4e5a66;
+            }
+            QScrollBar:vertical {
+                background: #252b32;
+                width: 12px;
+                margin: 0;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: #5d6976;
+                min-height: 24px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #717e8d;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: #252b32;
+                height: 12px;
+                margin: 0;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #5d6976;
+                min-width: 24px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #717e8d;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0;
+                border: none;
+                background: transparent;
+            }
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #3b4450;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #2a75ad;
+                border-radius: 3px;
+            }
+            QSlider::add-page:horizontal {
+                background: #3b4450;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #e8eef6;
+                border: 2px solid #2a75ad;
+                width: 16px;
+                height: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #ffffff;
+                border: 2px solid #4694cd;
+            }
+            QSlider::groove:vertical {
+                width: 6px;
+                background: #3b4450;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:vertical {
+                background: #3b4450;
+                border-radius: 3px;
+            }
+            QSlider::add-page:vertical {
+                background: #2a75ad;
+                border-radius: 3px;
+            }
+            QSlider::handle:vertical {
+                background: #e8eef6;
+                border: 2px solid #2a75ad;
+                width: 16px;
+                height: 16px;
+                margin: 0 -6px;
+                border-radius: 8px;
+            }
+            QSlider::handle:vertical:hover {
+                background: #ffffff;
+                border: 2px solid #4694cd;
+            }
+            """
         )
-        self.options_menu_button.grid(row=0, column=0, padx=(6, 4), pady=2, sticky="w")
-
-        self.help_menu_button = ctk.CTkButton(
-            self.menu_bar,
-            text="Help",
-            width=52,
-            height=24,
-            corner_radius=4,
-            fg_color="transparent",
-            text_color="#f2f2f2",
-            hover_color="#343638",
-            command=lambda: self.show_popup_menu(self.help_popup_menu, self.help_menu_button)
-        )
-        self.help_menu_button.grid(row=0, column=1, padx=(0, 4), pady=2, sticky="w")
-
-    def show_popup_menu(self, menu, button):
-        x = button.winfo_rootx()
-        y = button.winfo_rooty() + button.winfo_height()
-        try:
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
-
-    def configure_ttk_styles(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-
-        style.configure(
-            "SmartCaption.TCombobox",
-            fieldbackground="#343638",
-            background="#343638",
-            foreground="#f2f2f2",
-            borderwidth=0,
-            relief="flat",
-            arrowsize=14,
-            padding=4
-        )
-        style.map(
-            "SmartCaption.TCombobox",
-            fieldbackground=[("readonly", "#343638"), ("focus", "#343638"), ("!focus", "#343638")],
-            background=[("readonly", "#343638"), ("focus", "#343638"), ("!focus", "#343638")],
-            foreground=[("readonly", "#f2f2f2"), ("focus", "#f2f2f2"), ("!focus", "#f2f2f2")],
-            selectbackground=[("readonly", "#343638"), ("focus", "#343638"), ("!focus", "#343638")],
-            selectforeground=[("readonly", "#f2f2f2"), ("focus", "#f2f2f2"), ("!focus", "#f2f2f2")]
-        )
+        stylesheet = stylesheet.replace("__DROPDOWN_ARROW_PATH__", dropdown_arrow_path)
+        stylesheet = stylesheet.replace("__CHECKBOX_CHECK_PATH__", checkbox_check_path)
+        self.setStyleSheet(stylesheet)
 
     def show_best_accuracy_info(self):
-        messagebox.showinfo(
+        InfoDialog(
+            self,
             "Best Accuracy Settings",
             (
-                "Best overall setup:\n\n"
+                "Best overall setup:\n"
                 "Model: large-v3\n"
-                "Beam Size: 8-10\n"
-                "No Speech Threshold: 0.3-0.6\n"
-                "Condition On Previous Text: On\n\n"
-                "Recommended start:\n"
-                "large-v3 + Beam Size 8 + No Speech Threshold 0.6 + Context On\n\n"
-                "Max accuracy preset:\n"
-                "large-v3 + Beam Size 10 + No Speech Threshold 0.3 + Context On"
+                "Beam Size: 5 (default)\n"
+                "No Speech Threshold: 0.8 (default)\n"
+                "Condition On Previous Text: Off (default)\n"
+                "\n"
+                "For difficult audio (accents, background noise):\n"
+                "- Raise Beam Size to 8-10 (slower but more thorough)\n"
+                "- Lower No Speech Threshold to 0.6 (keeps more speech)\n"
+                "- Turn Context On (helps continuity)\n"
+                "\n"
+                "Note: There's no single 'best' setting - it depends on your audio.\n"
+                "The defaults work well for most clean recordings."
             )
-        )
+        ).exec()
 
     def show_accuracy_tips(self):
-        messagebox.showinfo(
+        InfoDialog(
+            self,
             "Accuracy Tips",
             (
-                "Tips:\n\n"
-                "- Missing quiet words: lower No Speech Threshold to 0.3.\n"
-                "- Hard audio or accents: raise Beam Size to 10.\n"
-                "- Repeats or carried mistakes: turn Context off.\n\n"
-                "Tradeoffs:\n\n"
-                "- large-v3 gives the best accuracy.\n"
-                "- Higher Beam Size is slower on CPU.\n"
-                "- Lower No Speech Threshold keeps more speech, but may add noise.\n"
-                "- Context usually helps continuity in longer speech."
+                "Common issues and what to try:\n"
+                "\n"
+                "- Missing words or quiet speech:\n"
+                "  Lower No Speech Threshold to 0.6 (keeps more audio)\n"
+                "\n"
+                "- Jumbled or hallucinated words:\n"
+                "  Raise No Speech Threshold to 1.0 (stricter filtering)\n"
+                "\n"
+                "- Repetitive or stuck phrases:\n"
+                "  Turn Context Off if it's on\n"
+                "\n"
+                "- Heavy accents or noisy audio:\n"
+                "  Raise Beam Size to 8-10\n"
+                "\n"
+                "Tradeoffs:\n"
+                "- large-v3 is the most accurate model overall.\n"
+                "- Higher Beam Size is significantly slower on CPU.\n"
+                "- Lower No Speech Threshold keeps more speech but may add junk.\n"
+                "- Context helps continuity but can carry mistakes forward."
             )
-        )
+        ).exec()
 
     def show_supported_formats(self):
-        messagebox.showinfo(
+        InfoDialog(
+            self,
             "Supported Formats",
             (
-                "Supported formats:\n\n"
                 "Audio: mp3, wav, m4a, flac, aac, ogg, wma\n"
-                "Video: mp4, mkv, mov, avi, webm, mpeg, mpg, m4v\n\n"
+                "Video: mp4, mkv, mov, avi, webm, mpeg, mpg, m4v\n"
+                "\n"
                 "You can also drag and drop supported files.\n"
                 "Actual support depends on the decoding libraries included in the build."
             )
-        )
+        ).exec()
 
     def show_credits_info(self):
-        messagebox.showinfo(
+        InfoDialog(
+            self,
             "Credits",
             (
-                "This app uses open-source software, including:\n\n"
-                "- CustomTkinter\n"
+                "This app uses open-source software, including:\n"
+                "- PyQt6\n"
                 "- faster-whisper\n"
                 "- CTranslate2\n"
                 "- huggingface_hub\n"
-                "- tkinterdnd2\n"
                 "- PyAV\n"
                 "- NumPy\n"
                 "- tokenizers\n"
-                "- tqdm\n\n"
+                "- tqdm\n"
+                "\n"
                 "For redistribution, include THIRD_PARTY_NOTICES.md with the app."
             )
-        )
+        ).exec()
 
     def build_ui(self):
-        self.grid_columnconfigure(0, weight=1)
+        central = DropWidget()
+        central.setObjectName("centralWidget")
+        central.file_dropped.connect(self.handle_file_drop)
+        self.setCentralWidget(central)
 
-        file_frame = ctk.CTkFrame(self)
-        file_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        file_frame.grid_columnconfigure(1, weight=1)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(20, 12, 20, 12)
+        root.setSpacing(10)
 
-        self.input_btn = ctk.CTkButton(file_frame, text="Input", command=self.pick_input)
-        self.input_btn.grid(row=0, column=0, padx=10)
+        file_frame = QFrame()
+        file_layout = QGridLayout(file_frame)
+        file_layout.setContentsMargins(12, 10, 12, 10)
+        file_layout.setHorizontalSpacing(10)
+        file_layout.setVerticalSpacing(8)
 
-        self.input_entry = ctk.CTkEntry(file_frame, textvariable=self.input_path)
-        self.input_entry.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+        self.input_btn = QPushButton("Input")
+        self.input_btn.clicked.connect(self.pick_input)
+        file_layout.addWidget(self.input_btn, 0, 0)
 
-        self.output_btn = ctk.CTkButton(file_frame, text="Output", command=self.pick_output)
-        self.output_btn.grid(row=1, column=0, padx=10)
+        self.input_entry = DropLineEdit()
+        self.input_entry.setText(self.input_path.get())
+        self.input_entry.textChanged.connect(self.input_path.set)
+        self.input_entry.file_dropped.connect(self.handle_file_drop)
+        file_layout.addWidget(self.input_entry, 0, 1)
 
-        self.output_entry = ctk.CTkEntry(file_frame, textvariable=self.output_path)
-        self.output_entry.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-        self.setup_drag_and_drop()
+        self.output_btn = QPushButton("Output")
+        self.output_btn.clicked.connect(self.pick_output)
+        file_layout.addWidget(self.output_btn, 1, 0)
 
-        options_frame = ctk.CTkFrame(self)
-        options_frame.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
-        options_frame.grid_columnconfigure((0, 1, 2), weight=1)
+        self.output_entry = QLineEdit()
+        self.output_entry.setText(self.output_path.get())
+        self.output_entry.textChanged.connect(self.output_path.set)
+        file_layout.addWidget(self.output_entry, 1, 1)
+        file_layout.setColumnStretch(1, 1)
+        root.addWidget(file_frame)
 
-        model_frame = ctk.CTkFrame(options_frame)
-        model_frame.grid(row=0, column=0, padx=(12, 6), pady=12, sticky="nsew")
-        model_frame.grid_columnconfigure(0, weight=1)
+        preset_frame = QFrame()
+        preset_layout = QHBoxLayout(preset_frame)
+        preset_layout.setContentsMargins(16, 8, 16, 8)
+        preset_layout.setSpacing(10)
+        preset_label = QLabel("Preset")
+        preset_label.setObjectName("bold")
+        preset_layout.addWidget(preset_label)
+        self.preset_menu = QComboBox()
+        self.preset_menu.addItems(["Normal", "TikTok"])
+        self.preset_menu.setCurrentText(self.preset.get())
+        self.preset_menu.currentTextChanged.connect(self.on_preset_changed)
+        self.preset_menu.setFixedWidth(120)
+        preset_layout.addWidget(self.preset_menu)
+        preset_layout.addStretch(1)
+        root.addWidget(preset_frame)
 
-        self.model_section_label = ctk.CTkLabel(model_frame, text="Model")
-        self.model_section_label.grid(row=0, column=0, padx=12, pady=(10, 6), sticky="w")
+        options_frame = QFrame()
+        options_layout = QGridLayout(options_frame)
+        options_layout.setContentsMargins(12, 12, 12, 12)
+        options_layout.setHorizontalSpacing(10)
+        options_layout.setVerticalSpacing(10)
 
-        self.model_menu = ctk.CTkOptionMenu(
-            model_frame,
-            variable=self.model_display,
-            values=[],
-            command=self.on_model_selected
-        )
-        self.model_menu.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+        model_frame = QFrame()
+        model_layout = QVBoxLayout(model_frame)
+        model_layout.setContentsMargins(12, 12, 12, 12)
+        model_layout.setSpacing(8)
+        self.model_section_label = QLabel("Model")
+        self.model_section_label.setObjectName("sectionLabel")
+        model_layout.addWidget(self.model_section_label)
+        self.model_menu = QComboBox()
+        self.model_menu.currentTextChanged.connect(self.on_model_selected)
+        model_layout.addWidget(self.model_menu)
+        self.download_btn = QPushButton("Download")
+        self.download_btn.clicked.connect(self.download_model)
+        model_layout.addWidget(self.download_btn)
+        self.delete_btn = QPushButton("Delete Model")
+        self.delete_btn.clicked.connect(self.delete_model)
+        model_layout.addWidget(self.delete_btn)
+        model_layout.addStretch(1)
+        options_layout.addWidget(model_frame, 0, 0)
+
+        timing_frame = QFrame()
+        timing_layout = QGridLayout(timing_frame)
+        timing_layout.setContentsMargins(12, 12, 12, 12)
+        timing_layout.setHorizontalSpacing(10)
+        timing_layout.setVerticalSpacing(8)
+        self.timing_section_label = QLabel("Timing")
+        self.timing_section_label.setObjectName("sectionLabel")
+        timing_layout.addWidget(self.timing_section_label, 0, 0, 1, 2)
+        self.word_timestamps_checkbox = QCheckBox("Word-level subtitle timing")
+        self.word_timestamps_checkbox.setChecked(self.use_word_timestamps.get())
+        self.word_timestamps_checkbox.toggled.connect(self.use_word_timestamps.set)
+        timing_layout.addWidget(self.word_timestamps_checkbox, 1, 0, 1, 2)
+        self.max_words_label = QLabel("Max words")
+        timing_layout.addWidget(self.max_words_label, 2, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.max_words_entry = QLineEdit(self.max_words_per_subtitle.get())
+        self.max_words_entry.textChanged.connect(self.max_words_per_subtitle.set)
+        timing_layout.addWidget(self.max_words_entry, 2, 1)
+        self.max_chars_label = QLabel("Max chars/line")
+        timing_layout.addWidget(self.max_chars_label, 3, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.max_chars_entry = QLineEdit(self.max_chars_per_line.get())
+        self.max_chars_entry.textChanged.connect(self.max_chars_per_line.set)
+        timing_layout.addWidget(self.max_chars_entry, 3, 1)
+        timing_layout.setColumnStretch(1, 1)
+        options_layout.addWidget(timing_frame, 0, 1)
+
+        text_frame = QFrame()
+        text_layout = QGridLayout(text_frame)
+        text_layout.setContentsMargins(12, 12, 12, 12)
+        text_layout.setHorizontalSpacing(10)
+        text_layout.setVerticalSpacing(8)
+        self.text_section_label = QLabel("Text")
+        self.text_section_label.setObjectName("sectionLabel")
+        text_layout.addWidget(self.text_section_label, 0, 0, 1, 2)
+        self.remove_punctuation_checkbox = QCheckBox("Remove punctuation")
+        self.remove_punctuation_checkbox.setChecked(self.remove_punctuation.get())
+        self.remove_punctuation_checkbox.toggled.connect(self.remove_punctuation.set)
+        text_layout.addWidget(self.remove_punctuation_checkbox, 1, 0, 1, 2)
+        self.text_case_label = QLabel("Text case")
+        text_layout.addWidget(self.text_case_label, 2, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.text_case_menu = QComboBox()
+        self.text_case_menu.addItems(["Normal", "lowercase", "UPPERCASE"])
+        self.text_case_menu.setCurrentText(self.text_case.get())
+        self.text_case_menu.currentTextChanged.connect(self.text_case.set)
+        text_layout.addWidget(self.text_case_menu, 2, 1)
+        self.language_label = QLabel("Language")
+        text_layout.addWidget(self.language_label, 3, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        language_values = list(self.language_display_map.keys())
+        english_display = next(display for display, code in self.language_display_map.items() if code == "en")
+        self.language_display.set(english_display)
+        self.language_menu = QComboBox()
+        self.language_menu.addItems(language_values)
+        self.language_menu.setCurrentText(english_display)
+        self.language_menu.currentTextChanged.connect(self.language_display.set)
+        text_layout.addWidget(self.language_menu, 3, 1)
+        text_layout.setColumnStretch(1, 1)
+        options_layout.addWidget(text_frame, 0, 2)
+
+        options_layout.setColumnStretch(0, 1)
+        options_layout.setColumnStretch(1, 1)
+        options_layout.setColumnStretch(2, 1)
+        root.addWidget(options_frame)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        self.download_status_label = QLabel("Idle")
+        self.download_status_label.setObjectName("statusLabel")
+        self.download_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        status_row.addWidget(self.download_status_label)
+        self.generate_btn = QPushButton("Generate")
+        self.generate_btn.setFixedWidth(120)
+        self.generate_btn.clicked.connect(self.start_transcription)
+        status_row.addWidget(self.generate_btn)
+        root.addLayout(status_row)
+
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        root.addWidget(self.log_box, 1)
+
         self.refresh_model_menu()
 
-        self.download_btn = ctk.CTkButton(model_frame, text="Download", command=self.download_model)
-        self.download_btn.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
-
-        self.delete_btn = ctk.CTkButton(model_frame, text="Delete Model", command=self.delete_model)
-        self.delete_btn.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
-
-        timing_frame = ctk.CTkFrame(options_frame)
-        timing_frame.grid(row=0, column=1, padx=6, pady=12, sticky="nsew")
-        timing_frame.grid_columnconfigure(1, weight=1)
-
-        self.timing_section_label = ctk.CTkLabel(timing_frame, text="Timing")
-        self.timing_section_label.grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="w")
-
-        self.word_timestamps_checkbox = ctk.CTkCheckBox(
-            timing_frame,
-            text="Word-level subtitle timing",
-            variable=self.use_word_timestamps
-        )
-        self.word_timestamps_checkbox.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="w")
-
-        self.max_words_label = ctk.CTkLabel(timing_frame, text="Max words")
-        self.max_words_label.grid(row=2, column=0, padx=(12, 8), pady=(0, 8), sticky="w")
-
-        self.max_words_entry = ctk.CTkEntry(
-            timing_frame,
-            textvariable=self.max_words_per_subtitle,
-            width=60
-        )
-        self.max_words_entry.grid(row=2, column=1, padx=(0, 12), pady=(0, 8), sticky="ew")
-
-        self.max_chars_label = ctk.CTkLabel(timing_frame, text="Max chars/line")
-        self.max_chars_label.grid(row=3, column=0, padx=(12, 8), pady=(0, 12), sticky="w")
-
-        self.max_chars_entry = ctk.CTkEntry(
-            timing_frame,
-            textvariable=self.max_chars_per_line,
-            width=60
-        )
-        self.max_chars_entry.grid(row=3, column=1, padx=(0, 12), pady=(0, 12), sticky="ew")
-
-        text_frame = ctk.CTkFrame(options_frame)
-        text_frame.grid(row=0, column=2, padx=(6, 12), pady=12, sticky="nsew")
-        text_frame.grid_columnconfigure(1, weight=1)
-
-        self.text_section_label = ctk.CTkLabel(text_frame, text="Text")
-        self.text_section_label.grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="w")
-
-        self.remove_punctuation_checkbox = ctk.CTkCheckBox(
-            text_frame,
-            text="Remove punctuation",
-            variable=self.remove_punctuation
-        )
-        self.remove_punctuation_checkbox.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 10), sticky="w")
-
-        self.text_case_label = ctk.CTkLabel(text_frame, text="Text case")
-        self.text_case_label.grid(row=2, column=0, padx=(12, 8), pady=(0, 12), sticky="w")
-
-        self.text_case_menu = ctk.CTkOptionMenu(
-            text_frame,
-            variable=self.text_case,
-            values=["Normal", "lowercase", "UPPERCASE"]
-        )
-        self.text_case_menu.grid(row=2, column=1, padx=(0, 12), pady=(0, 12), sticky="ew")
-
-        self.language_label = ctk.CTkLabel(text_frame, text="Language")
-        self.language_label.grid(row=3, column=0, padx=(12, 8), pady=(0, 12), sticky="w")
-
-        language_values = list(self.language_display_map.keys())
-        english_display = next(
-            display for display, code in self.language_display_map.items() if code == "en"
-        )
-        self.language_display.set(english_display)
-
-        self.language_menu = ttk.Combobox(
-            text_frame,
-            textvariable=self.language_display,
-            values=language_values,
-            state="readonly",
-            height=12,
-            style="SmartCaption.TCombobox"
-        )
-        self.language_menu.grid(row=3, column=1, padx=(0, 12), pady=(0, 12), sticky="ew")
-
-        self.download_status = ctk.StringVar(value="Idle")
-        self.download_status_label = ctk.CTkLabel(self, textvariable=self.download_status, anchor="w")
-        self.download_status_label.grid(row=3, column=0, padx=(24, 140), pady=(0, 6), sticky="ew")
-
-        self.generate_btn = ctk.CTkButton(
-            self,
-            text="Generate",
-            command=self.start_transcription,
-            width=120
-        )
-        self.generate_btn.grid(row=3, column=0, padx=24, pady=(0, 6), sticky="e")
-
-        self.log_box = ctk.CTkTextbox(self)
-        self.log_box.grid(row=4, column=0, padx=20, pady=(0, 10), sticky="nsew")
-        self.grid_rowconfigure(4, weight=1)
-
     def _append_log(self, text):
-        self.log_box.insert("end", text + "\n")
-        self.log_box.see("end")
+        self.log_box.append(text)
+        self.log_box.moveCursor(self.log_box.textCursor().MoveOperation.End)
 
     def log(self, text):
-        self.after(0, lambda text=text: self._append_log(text))
+        self.log_requested.emit(text)
 
-    def show_centered(self):
-        self.geometry("900x600")
-        self.update_idletasks()
-        self.minsize(900, 600)
-        self.maxsize(self.winfo_screenwidth(), self.winfo_screenheight())
-        self.center_window(self)
-        self.deiconify()
-        self.update_idletasks()
-        self.center_window(self)
-        self.lift()
-        self.focus_force()
+    def run_in_worker(self, function, finished_callback=None):
+        thread = QThread(self)
+        worker = FunctionWorker(function)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.error.connect(self.log)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
 
-    def setup_drag_and_drop(self):
-        for widget in (self, self.input_entry):
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<Drop>>", self.handle_file_drop)
+        def cleanup():
+            self.worker_threads = [item for item in self.worker_threads if item[0] is not thread]
+            if finished_callback:
+                finished_callback()
 
-    def center_window(self, window):
-        window.update_idletasks()
+        thread.finished.connect(cleanup)
+        self.worker_threads.append((thread, worker))
+        thread.start()
 
-        width = window.winfo_width()
-        height = window.winfo_height()
+    def on_preset_changed(self, choice):
+        self.preset.set(choice)
+        if choice == "Normal":
+            self.pause_threshold.set(0.5)
+            self.max_subtitle_duration.set(3.2)
+            self.vad_silence_ms.set(700)
+            self.break_on_punctuation_immediate.set(False)
+            self.log("Preset: Normal - balanced subtitle pacing.")
+        elif choice == "TikTok":
+            self.pause_threshold.set(0.5)
+            self.max_subtitle_duration.set(2.0)
+            self.vad_silence_ms.set(500)
+            self.break_on_punctuation_immediate.set(True)
+            self.log("Preset: TikTok - faster subtitle pacing for short-form video.")
 
-        if width <= 1 or height <= 1:
-            geometry = window.geometry().split("+")[0]
-            if "x" in geometry:
-                width_str, height_str = geometry.split("x", 1)
-                try:
-                    width = int(width_str)
-                    height = int(height_str)
-                except ValueError:
-                    width = max(window.winfo_reqwidth(), 1)
-                    height = max(window.winfo_reqheight(), 1)
-            else:
-                width = max(window.winfo_reqwidth(), 1)
-                height = max(window.winfo_reqheight(), 1)
+    def handle_file_drop(self, path):
+        if not path or not os.path.isfile(path):
+            self.log("Drop a file onto the input field or app window.")
+            return
 
-        screen_width = window.winfo_screenwidth()
-        screen_height = window.winfo_screenheight()
-        x = max((screen_width - width) // 2, 0)
-        y = max((screen_height - height) // 2, 0)
-        window.geometry(f"{width}x{height}+{x}+{y}")
+        self.set_input_file(path)
+
+    def set_busy_controls_disabled(self, disabled):
+        for widget in (
+            self.input_btn,
+            self.input_entry,
+            self.output_btn,
+            self.output_entry,
+            self.preset_menu,
+            self.download_btn,
+            self.generate_btn,
+            self.delete_btn,
+            self.model_menu,
+            self.word_timestamps_checkbox,
+            self.remove_punctuation_checkbox,
+            self.text_case_menu,
+            self.language_menu,
+            self.max_words_entry,
+            self.max_chars_entry,
+        ):
+            widget.setDisabled(disabled)
+        self.menuBar().setDisabled(disabled)
+        if self.advanced_dialog is not None and self.advanced_dialog.isVisible():
+            self.advanced_dialog.setDisabled(disabled)
 
     def set_download_state(self, active, model_name=None):
-        def update_ui():
-            if active:
-                self.start_status_spinner(f"Downloading {model_name}...")
-                self.download_btn.configure(state="disabled")
-                self.generate_btn.configure(state="disabled")
-                self.delete_btn.configure(state="disabled")
-                self.model_menu.configure(state="disabled")
-            else:
-                self.stop_status_spinner()
-                self.download_btn.configure(state="normal")
-                self.generate_btn.configure(state="normal")
-                self.delete_btn.configure(state="normal")
-                self.model_menu.configure(state="normal")
+        if active:
+            self.start_status_spinner(f"Downloading {model_name}...")
+        else:
+            self.stop_status_spinner()
 
-        self.after(0, update_ui)
+        self.set_busy_controls_disabled(bool(active))
 
     def start_status_spinner(self, message):
         self.spinner_message = message
         self.spinner_index = 0
-        self.download_status.set(f"{self.spinner_frames[self.spinner_index]} {self.spinner_message}")
-        if self.spinner_job is not None:
-            self.after_cancel(self.spinner_job)
-        self.spinner_job = self.after(120, self.schedule_spinner)
+        self.download_status_label.setText(f"{self.spinner_frames[self.spinner_index]} {self.spinner_message}")
+        self.spinner_timer.start()
 
     def stop_status_spinner(self):
-        if self.spinner_job is not None:
-            self.after_cancel(self.spinner_job)
-            self.spinner_job = None
+        self.spinner_timer.stop()
         self.spinner_message = "Idle"
-        self.download_status.set("Idle")
+        self.download_status_label.setText("Idle")
 
     def schedule_spinner(self):
         if not self.is_downloading and not self.is_transcribing:
-            self.spinner_job = None
+            self.spinner_timer.stop()
             return
 
         self.spinner_index = (self.spinner_index + 1) % len(self.spinner_frames)
-        self.download_status.set(f"{self.spinner_frames[self.spinner_index]} {self.spinner_message}")
-        self.spinner_job = self.after(120, self.schedule_spinner)
+        self.download_status_label.setText(f"{self.spinner_frames[self.spinner_index]} {self.spinner_message}")
 
     def set_transcription_state(self, active):
-        def update_ui():
-            self.is_transcribing = active
-            if active:
-                self.start_status_spinner("Transcribing...")
-                self.generate_btn.configure(state="disabled")
-                self.download_btn.configure(state="disabled")
-                self.delete_btn.configure(state="disabled")
-                self.model_menu.configure(state="disabled")
-                self.word_timestamps_checkbox.configure(state="disabled")
-                self.remove_punctuation_checkbox.configure(state="disabled")
-                self.text_case_menu.configure(state="disabled")
-                self.language_menu.configure(state="disabled")
-                self.max_words_entry.configure(state="disabled")
-                self.max_chars_entry.configure(state="disabled")
-            else:
-                self.stop_status_spinner()
-                self.generate_btn.configure(state="normal")
-                self.download_btn.configure(state="normal")
-                self.delete_btn.configure(state="normal")
-                self.model_menu.configure(state="normal")
-                self.word_timestamps_checkbox.configure(state="normal")
-                self.remove_punctuation_checkbox.configure(state="normal")
-                self.text_case_menu.configure(state="normal")
-                self.language_menu.configure(state="readonly")
-                self.max_words_entry.configure(state="normal")
-                self.max_chars_entry.configure(state="normal")
+        self.is_transcribing = active
+        if active:
+            self.start_status_spinner("Transcribing...")
+        else:
+            self.stop_status_spinner()
 
-        self.after(0, update_ui)
+        self.set_busy_controls_disabled(bool(active))
 
     def get_default_advanced_settings(self):
         return {
@@ -931,16 +1242,17 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         }
 
     def open_advanced_options(self):
-        if self.advanced_dialog is not None and self.advanced_dialog.winfo_exists():
-            self.advanced_dialog.focus()
+        if self.advanced_dialog is not None and self.advanced_dialog.isVisible():
+            self.advanced_dialog.raise_()
+            self.advanced_dialog.activateWindow()
             return
 
         self.advanced_dialog = AdvancedOptionsDialog(self)
-        self.advanced_dialog.bind("<Destroy>", self.on_advanced_dialog_destroy, add="+")
+        self.advanced_dialog.finished.connect(self.on_advanced_dialog_destroy)
+        self.advanced_dialog.show()
 
-    def on_advanced_dialog_destroy(self, event):
-        if event.widget is self.advanced_dialog:
-            self.advanced_dialog = None
+    def on_advanced_dialog_destroy(self):
+        self.advanced_dialog = None
 
     def get_repo_id(self, model_name):
         return f"{MODEL_REPO_PREFIX}{model_name}"
@@ -999,61 +1311,52 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         current_model = self.model_name.get()
         display_values = [self.get_model_display_name(model) for model in self.available_models]
         self.model_display_map = dict(zip(display_values, self.available_models))
-        self.model_menu.configure(values=display_values)
 
+        self.model_menu.blockSignals(True)
+        self.model_menu.clear()
+        self.model_menu.addItems(display_values)
         selected_display = next(
             (display for display, model in self.model_display_map.items() if model == current_model),
             display_values[0]
         )
+        self.model_menu.setCurrentText(selected_display)
+        self.model_menu.blockSignals(False)
+
         self.model_display.set(selected_display)
         self.model_name.set(self.model_display_map[selected_display])
 
     def on_model_selected(self, selected_display):
         model_name = self.model_display_map.get(selected_display)
         if model_name:
+            self.model_display.set(selected_display)
             self.model_name.set(model_name)
 
     def set_input_file(self, path):
         self.input_path.set(path)
         self.output_path.set(os.path.dirname(path))
+        self.input_entry.setText(path)
+        self.output_entry.setText(self.output_path.get())
         self.log(f"Selected input file: {os.path.basename(path)}")
         self.log(f"Output folder set to: {self.output_path.get()}")
 
     def pick_input(self):
-        path = filedialog.askopenfilename(
-            filetypes=[
-                ("Supported media", " ".join(f"*{ext}" for ext in SUPPORTED_MEDIA_EXTENSIONS)),
-                ("Audio files", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.wma"),
-                ("Video files", "*.mp4 *.mkv *.mov *.avi *.webm *.mpeg *.mpg *.m4v"),
-                ("All files", "*.*"),
-            ]
+        filter_text = (
+            "Supported media (" + " ".join(f"*{ext}" for ext in SUPPORTED_MEDIA_EXTENSIONS) + ");;"
+            "Audio files (*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.wma);;"
+            "Video files (*.mp4 *.mkv *.mov *.avi *.webm *.mpeg *.mpg *.m4v);;"
+            "All files (*.*)"
         )
+        path, _ = QFileDialog.getOpenFileName(self, "Select Input File", "", filter_text)
         if path:
             self.set_input_file(path)
 
     def pick_output(self):
-        path = filedialog.askdirectory()
+        path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if path:
             self.output_path.set(path)
+            self.output_entry.setText(path)
 
-    def handle_file_drop(self, event):
-        try:
-            paths = self.tk.splitlist(event.data)
-        except Exception:
-            paths = [event.data]
-
-        if not paths:
-            return "copy"
-
-        file_path = paths[0].strip().strip("{}")
-        if not os.path.isfile(file_path):
-            self.log("Drop a file onto the input field or app window.")
-            return "copy"
-
-        self.set_input_file(file_path)
-        return "copy"
-
-    # ✅ REAL DETECTION (load test)
+    # REAL DETECTION (load test)
     def model_exists(self, model_name):
         if not self.installed_models:
             self.detect_installed_models()
@@ -1075,8 +1378,7 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         self.set_download_state(True, model_name)
 
         self.log(f"Downloading {model_name}...")
-
-        threading.Thread(target=self._download_worker, args=(model_name,), daemon=True).start()
+        self.run_in_worker(lambda: self._download_worker(model_name), self.finish_download)
 
     def _download_worker(self, model_name):
         try:
@@ -1085,19 +1387,17 @@ class WhisperApp(ctk.CTk, DnDWrapper):
                 repo_id=self.get_repo_id(model_name),
                 local_dir=model_dir,
                 max_workers=1,
-                tqdm_class=None
+                tqdm_class=None,
             )
 
-            self.after(0, self.refresh_model_menu)
-            self.after(0, lambda: self.log(f"{model_name} installed ✅"))
-            self.after(0, lambda: self.log(f"Downloaded to: {model_dir}"))
+            self.log(f"{model_name} installed ✅")
+            self.log(f"Downloaded to: {model_dir}")
 
         except Exception as err:
-            self.after(0, lambda err=err: self.log(f"Error: {err}"))
-
-        self.after(0, self.finish_download)
+            self.log(f"Error: {err}")
 
     def finish_download(self):
+        self.refresh_model_menu()
         self.is_downloading = False
         self.set_download_state(False)
 
@@ -1107,7 +1407,7 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             try:
                 os.chmod(path, stat.S_IWRITE)
                 func(path)
-            except:
+            except Exception:
                 pass
 
         shutil.rmtree(path, onerror=onerror)
@@ -1173,7 +1473,20 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             self.log("Transcription cancelled.")
             return
 
+        model_path = self.get_model_load_path(model_name)
+        if not model_path:
+            self.log(f"{model_name} is not installed. Download it first.")
+            return
+
         subtitle_settings["output_file"] = output_file
+        subtitle_settings["model_name"] = model_name
+        subtitle_settings["model_path"] = model_path
+        subtitle_settings["input_path"] = input_path
+        subtitle_settings["pause_threshold"] = self.pause_threshold.get()
+        subtitle_settings["max_subtitle_duration"] = self.max_subtitle_duration.get()
+        subtitle_settings["vad_silence_ms"] = self.vad_silence_ms.get()
+        subtitle_settings["break_on_punctuation_immediate"] = self.break_on_punctuation_immediate.get()
+
         self.set_transcription_state(True)
         self.log(f"Starting transcription with {model_name}...")
         self.log(f"Input: {os.path.basename(input_path)}")
@@ -1185,14 +1498,14 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             f"case={subtitle_settings['text_case']}, beam={subtitle_settings['beam_size']}, "
             f"no-speech={subtitle_settings['no_speech_threshold']:.1f}, "
             f"context={'on' if subtitle_settings['condition_on_previous_text'] else 'off'}"
-            )
+        )
         self.log(f"Output: {output_file}")
-        threading.Thread(target=self.run_whisper, args=(subtitle_settings,), daemon=True).start()
+        self.run_in_worker(lambda: self.run_whisper(subtitle_settings), lambda: self.set_transcription_state(False))
 
     def run_whisper(self, subtitle_settings):
         try:
-            model_name = self.model_name.get()
-            model_path = self.get_model_load_path(model_name)
+            model_name = subtitle_settings["model_name"]
+            model_path = subtitle_settings["model_path"]
             if not model_path:
                 self.log(f"{model_name} is not installed. Download it first.")
                 return
@@ -1201,13 +1514,13 @@ class WhisperApp(ctk.CTk, DnDWrapper):
                 model_path,
                 compute_type="int8",
                 device="cpu",
-                local_files_only=True
+                local_files_only=True,
             )
             self.log("Model loaded. Processing audio...")
 
             use_word_timestamps = subtitle_settings["use_word_timestamps"]
             segments, _ = model.transcribe(
-                self.input_path.get(),
+                subtitle_settings["input_path"],
                 language=subtitle_settings["language_code"],
                 beam_size=subtitle_settings["beam_size"],
                 best_of=5,
@@ -1219,9 +1532,9 @@ class WhisperApp(ctk.CTk, DnDWrapper):
                 word_timestamps=use_word_timestamps,
                 vad_filter=True,
                 vad_parameters={
-                    "min_silence_duration_ms": 700,
+                    "min_silence_duration_ms": subtitle_settings["vad_silence_ms"],
                     "speech_pad_ms": 200,
-                }
+                },
             )
 
             subtitle_segments = self.build_subtitle_segments(segments, subtitle_settings)
@@ -1234,8 +1547,6 @@ class WhisperApp(ctk.CTk, DnDWrapper):
 
         except Exception as err:
             self.log(f"Error: {err}")
-        finally:
-            self.after(0, lambda: self.set_transcription_state(False))
 
     def resolve_output_file_path(self, output_dir):
         input_name = os.path.splitext(os.path.basename(self.input_path.get().strip()))[0] or "output"
@@ -1252,7 +1563,7 @@ class WhisperApp(ctk.CTk, DnDWrapper):
 
     def ask_output_conflict(self, output_file):
         dialog = OutputConflictDialog(self, output_file)
-        self.wait_window(dialog)
+        dialog.exec()
         return dialog.choice
 
     def get_renamed_output_path(self, output_file):
@@ -1327,7 +1638,6 @@ class WhisperApp(ctk.CTk, DnDWrapper):
                 f.write(f"{seg['text']}\n\n")
                 if i % 25 == 0:
                     self.log(f"Wrote {i} subtitle entries...")
-
 
     def build_subtitle_segments(self, segments, subtitle_settings):
         subtitle_segments = []
@@ -1404,7 +1714,7 @@ class WhisperApp(ctk.CTk, DnDWrapper):
 
             if current_words:
                 previous_word_end = getattr(current_words[-1], "end", None)
-                if previous_word_end is not None and word_start - previous_word_end >= 1.0:
+                if previous_word_end is not None and word_start - previous_word_end >= subtitle_settings["pause_threshold"]:
                     subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
                     current_words = []
 
@@ -1431,9 +1741,12 @@ class WhisperApp(ctk.CTk, DnDWrapper):
             return True
         if len(wrapped_lines) > 2:
             return True
-        if duration >= 3.2:
+        if duration >= subtitle_settings["max_subtitle_duration"]:
             return True
-        if len(words) >= 3 and last_word.endswith((".", "!", "?", ",")):
+        if subtitle_settings["break_on_punctuation_immediate"]:
+            if last_word.endswith((".", "!", "?")):
+                return True
+        elif len(words) >= 3 and last_word.endswith((".", "!", "?", ",")):
             return True
 
         return False
@@ -1502,7 +1815,8 @@ class WhisperApp(ctk.CTk, DnDWrapper):
         return lines
 
 
-
 if __name__ == "__main__":
-    app = WhisperApp()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    window = WhisperApp()
+    window.show()
+    sys.exit(app.exec())

@@ -16,6 +16,9 @@ releases/
 models/*
 !models/README.md
 
+# XetHub cache
+xet/
+
 # Local logs and temp files
 *.log
 *.tmp

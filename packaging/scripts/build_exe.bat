@@ -30,7 +30,7 @@ if "%choice%"=="5" goto end
 goto menu
 
 :ensure_python_deps
-python -m pip install pyinstaller customtkinter faster-whisper huggingface_hub tkinterdnd2 av ctranslate2 numpy tokenizers tqdm
+python -m pip install pyinstaller PyQt6 faster-whisper huggingface_hub av ctranslate2 numpy tokenizers tqdm
 if errorlevel 1 (
     echo.
     echo Failed to install build dependencies.

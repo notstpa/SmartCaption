@@ -4,7 +4,7 @@
 #define MyAppExeName "SmartCaption.exe"
 
 [Setup]
-AppId={{A7908D88-0AC4-4E73-A87A-3B8CB7FB5210}
+AppId={{A7908D88-0AC4-4E73-A87A-3B8CB7FB5210}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName}

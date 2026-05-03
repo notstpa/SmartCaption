@@ -7,6 +7,8 @@ BASE_DIR = os.path.abspath(os.getcwd())
 datas = [
     (os.path.join(BASE_DIR, "THIRD_PARTY_NOTICES.md"), "."),
     (os.path.join(BASE_DIR, "icon.ico"), "."),
+    (os.path.join(BASE_DIR, "dropdown_arrow.svg"), "."),
+    (os.path.join(BASE_DIR, "checkbox_check.svg"), "."),
 ]
 binaries = []
 hiddenimports = []
@@ -14,7 +16,7 @@ icon_path = os.path.join(BASE_DIR, "icon.ico")
 if not os.path.exists(icon_path):
     icon_path = None
 
-for package_name in ("tkinterdnd2",):
+for package_name in ("PyQt6", "faster_whisper"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package_name)
     datas += pkg_datas
     binaries += pkg_binaries
