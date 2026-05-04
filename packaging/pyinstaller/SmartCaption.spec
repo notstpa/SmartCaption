@@ -7,16 +7,31 @@ BASE_DIR = os.path.abspath(os.getcwd())
 datas = [
     (os.path.join(BASE_DIR, "THIRD_PARTY_NOTICES.md"), "."),
     (os.path.join(BASE_DIR, "icon.ico"), "."),
-    (os.path.join(BASE_DIR, "dropdown_arrow.svg"), "."),
-    (os.path.join(BASE_DIR, "checkbox_check.svg"), "."),
 ]
 binaries = []
 hiddenimports = []
+excludes = [
+    "PyQt5",
+    "PyQt5_sip",
+    "PySide2",
+    "PySide6",
+    "PySide6_Addons",
+    "PySide6_Essentials",
+    "shiboken2",
+    "shiboken6",
+    "llvmlite",
+    "numba",
+    "scipy",
+    "tensorflow",
+    "torch",
+    "torchaudio",
+    "torchvision",
+]
 icon_path = os.path.join(BASE_DIR, "icon.ico")
 if not os.path.exists(icon_path):
     icon_path = None
 
-for package_name in ("PyQt6", "faster_whisper"):
+for package_name in ("faster_whisper",):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package_name)
     datas += pkg_datas
     binaries += pkg_binaries
@@ -32,7 +47,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excludes,
     noarchive=False,
     optimize=0,
 )

@@ -4,7 +4,7 @@ import shutil
 import stat
 
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QColor, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
+import qdarktheme
 
 APP_NAME = "SmartCaption"
 MODEL_REPO_PREFIX = "Systran/faster-whisper-"
@@ -187,8 +188,449 @@ def resolve_model_dir(app_dir):
 APP_DIR = get_app_dir()
 MODEL_DIR, MODEL_DIR_MODE = resolve_model_dir(APP_DIR)
 APP_ICON_PATH = get_resource_path("icon.ico")
-DROPDOWN_ARROW_PATH = get_resource_path("dropdown_arrow.svg")
-CHECKBOX_CHECK_PATH = get_resource_path("checkbox_check.svg")
+
+WINDOW_BG = "#171717"
+PANEL_BG = "#202020"
+INPUT_BG = "#2A2A2A"
+INACTIVE_TAB_BG = "#1C1C1C"
+BORDER = "#3A3A3A"
+SOFT_BORDER = "#303030"
+TEXT = "#F2F2F2"
+MUTED_TEXT = "#B8B8B8"
+DISABLED_TEXT = "#7A7A7A"
+BUTTON_BG = "#333333"
+BUTTON_HOVER_BG = "#404040"
+BUTTON_PRESSED_BG = "#292929"
+ACCENT = "#8E8E8E"
+SELECTION_BG = "#555555"
+PROGRESS_BG = "#A5A5A5"
+
+
+def build_theme_stylesheet():
+    return f"""
+        * {{
+            font-family: "Segoe UI", "Arial", sans-serif;
+            font-size: 13px;
+            color: {TEXT};
+            selection-background-color: {SELECTION_BG};
+            selection-color: {TEXT};
+        }}
+        QMainWindow, QDialog, QWidget#centralWidget {{
+            background: {WINDOW_BG};
+            color: {TEXT};
+        }}
+        QWidget {{
+            background: {WINDOW_BG};
+            color: {TEXT};
+        }}
+        QFrame {{
+            background: {PANEL_BG};
+            border: 1px solid {SOFT_BORDER};
+            border-radius: 8px;
+        }}
+        QFrame#card {{
+            background: {PANEL_BG};
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+        }}
+        QFrame#innerCard {{
+            background: {INPUT_BG};
+            border: 1px solid {SOFT_BORDER};
+            border-radius: 8px;
+        }}
+        QLabel {{
+            background: transparent;
+            border: none;
+            color: {TEXT};
+        }}
+        QLabel#title {{
+            font-size: 18px;
+            font-weight: 700;
+            color: {TEXT};
+        }}
+        QLabel#sectionLabel, QLabel#bold {{
+            font-weight: 700;
+            color: {TEXT};
+        }}
+        QLabel#muted {{
+            color: {MUTED_TEXT};
+        }}
+        QLabel#statusLabel {{
+            color: {MUTED_TEXT};
+            background: {PANEL_BG};
+            border: 1px solid {SOFT_BORDER};
+            border-radius: 6px;
+            padding: 6px 8px;
+        }}
+        QMenuBar {{
+            background: {PANEL_BG};
+            color: {TEXT};
+            border-bottom: 1px solid {SOFT_BORDER};
+            padding: 2px;
+            min-height: 24px;
+        }}
+        QMenuBar::item {{
+            background: transparent;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }}
+        QMenuBar::item:selected, QMenuBar::item:pressed {{
+            background: {BUTTON_HOVER_BG};
+            color: {TEXT};
+        }}
+        QMenu {{
+            background: {PANEL_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            padding: 4px;
+        }}
+        QMenu::item {{
+            background: transparent;
+            color: {TEXT};
+            padding: 6px 30px 6px 14px;
+            min-height: 20px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background: {SELECTION_BG};
+            color: {TEXT};
+        }}
+        QMenu::item:disabled {{
+            color: {DISABLED_TEXT};
+        }}
+        QMenu::separator {{
+            height: 1px;
+            background: {SOFT_BORDER};
+            margin: 4px 6px;
+        }}
+        QToolTip {{
+            background: {PANEL_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 4px;
+            padding: 6px 8px;
+        }}
+        QPushButton {{
+            background: {BUTTON_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            padding: 7px 12px;
+            min-height: 18px;
+        }}
+        QPushButton:hover {{
+            background: {BUTTON_HOVER_BG};
+            border: 1px solid {ACCENT};
+        }}
+        QPushButton:pressed {{
+            background: {BUTTON_PRESSED_BG};
+            border: 1px solid {SOFT_BORDER};
+        }}
+        QPushButton:disabled {{
+            background: {BUTTON_PRESSED_BG};
+            color: {DISABLED_TEXT};
+            border: 1px solid {SOFT_BORDER};
+        }}
+        QPushButton#helpButton {{
+            background: {BUTTON_BG};
+            color: {MUTED_TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 11px;
+            padding: 0;
+            min-height: 0;
+            font-weight: 700;
+        }}
+        QPushButton#helpButton:hover {{
+            background: {BUTTON_HOVER_BG};
+            color: {TEXT};
+        }}
+        QPushButton#helpButton:pressed {{
+            background: {BUTTON_PRESSED_BG};
+        }}
+        QLineEdit, QComboBox, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {{
+            background: {INPUT_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            padding: 6px 8px;
+            selection-background-color: {SELECTION_BG};
+            selection-color: {TEXT};
+        }}
+        QLineEdit:hover, QComboBox:hover, QTextEdit:hover, QPlainTextEdit:hover,
+        QSpinBox:hover, QDoubleSpinBox:hover {{
+            border: 1px solid {ACCENT};
+        }}
+        QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus,
+        QSpinBox:focus, QDoubleSpinBox:focus {{
+            border: 1px solid {ACCENT};
+            background: {INPUT_BG};
+        }}
+        QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+        QSpinBox:disabled, QDoubleSpinBox:disabled {{
+            background: {PANEL_BG};
+            color: {DISABLED_TEXT};
+            border: 1px solid {SOFT_BORDER};
+        }}
+        QLineEdit, QComboBox {{
+            min-height: 20px;
+        }}
+        QTextEdit:read-only, QPlainTextEdit:read-only {{
+            background: {INPUT_BG};
+            color: {TEXT};
+        }}
+        QComboBox {{
+            padding: 6px 34px 6px 8px;
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 30px;
+            border-left: 1px solid {BORDER};
+            border-top-right-radius: 6px;
+            border-bottom-right-radius: 6px;
+            background: {BUTTON_BG};
+        }}
+        QComboBox::drop-down:hover {{
+            background: {BUTTON_HOVER_BG};
+        }}
+        QComboBox QAbstractItemView, QListView, QListWidget, QTreeView, QTreeWidget, QTableView, QTableWidget {{
+            background: {INPUT_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            selection-background-color: {SELECTION_BG};
+            selection-color: {TEXT};
+            outline: 0;
+            padding: 4px;
+        }}
+        QAbstractItemView::item {{
+            min-height: 22px;
+            padding: 4px 8px;
+            color: {TEXT};
+        }}
+        QAbstractItemView::item:selected {{
+            background: {SELECTION_BG};
+            color: {TEXT};
+        }}
+        QAbstractItemView::item:disabled {{
+            color: {DISABLED_TEXT};
+        }}
+        QHeaderView::section {{
+            background: {PANEL_BG};
+            color: {TEXT};
+            border: 1px solid {SOFT_BORDER};
+            padding: 5px 8px;
+        }}
+        QCheckBox, QRadioButton {{
+            background: transparent;
+            color: {TEXT};
+            spacing: 8px;
+            padding: 4px 0;
+            min-height: 20px;
+            border: none;
+        }}
+        QCheckBox:disabled, QRadioButton:disabled {{
+            color: {DISABLED_TEXT};
+        }}
+        QCheckBox::indicator, QRadioButton::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {BORDER};
+            background: {INPUT_BG};
+        }}
+        QCheckBox::indicator {{
+            border-radius: 4px;
+        }}
+        QRadioButton::indicator {{
+            border-radius: 8px;
+        }}
+        QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+            border: 1px solid {ACCENT};
+            background: {BUTTON_HOVER_BG};
+        }}
+        QCheckBox::indicator:checked {{
+            background: {SELECTION_BG};
+            border: 1px solid {ACCENT};
+        }}
+        QRadioButton::indicator:checked {{
+            background: {SELECTION_BG};
+            border: 4px solid {INPUT_BG};
+        }}
+        QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+            background: {PANEL_BG};
+            border: 1px solid {SOFT_BORDER};
+        }}
+        QTabWidget::pane {{
+            background: {PANEL_BG};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            top: -1px;
+        }}
+        QTabBar::tab {{
+            background: {INACTIVE_TAB_BG};
+            color: {MUTED_TEXT};
+            border: 1px solid {SOFT_BORDER};
+            padding: 7px 12px;
+            min-width: 80px;
+        }}
+        QTabBar::tab:selected {{
+            background: {PANEL_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+        }}
+        QTabBar::tab:hover:!selected {{
+            background: {BUTTON_HOVER_BG};
+            color: {TEXT};
+        }}
+        QProgressBar {{
+            background: {INPUT_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            text-align: center;
+            min-height: 14px;
+        }}
+        QProgressBar::chunk {{
+            background: {PROGRESS_BG};
+            border-radius: 5px;
+        }}
+        QScrollBar:vertical {{
+            background: {PANEL_BG};
+            width: 12px;
+            margin: 0;
+            border: none;
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {BUTTON_BG};
+            min-height: 24px;
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {BUTTON_HOVER_BG};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0;
+            border: none;
+            background: transparent;
+        }}
+        QScrollBar:horizontal {{
+            background: {PANEL_BG};
+            height: 12px;
+            margin: 0;
+            border: none;
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {BUTTON_BG};
+            min-width: 24px;
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {BUTTON_HOVER_BG};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0;
+            border: none;
+            background: transparent;
+        }}
+        QSlider::groove:horizontal {{
+            height: 6px;
+            background: {INPUT_BG};
+            border: 1px solid {SOFT_BORDER};
+            border-radius: 3px;
+        }}
+        QSlider::sub-page:horizontal {{
+            background: {PROGRESS_BG};
+            border-radius: 3px;
+        }}
+        QSlider::add-page:horizontal {{
+            background: {INPUT_BG};
+            border-radius: 3px;
+        }}
+        QSlider::handle:horizontal {{
+            background: {ACCENT};
+            border: 1px solid {TEXT};
+            width: 16px;
+            height: 16px;
+            margin: -6px 0;
+            border-radius: 8px;
+        }}
+        QSlider::handle:horizontal:hover {{
+            background: {PROGRESS_BG};
+        }}
+        QSlider::groove:vertical {{
+            width: 6px;
+            background: {INPUT_BG};
+            border: 1px solid {SOFT_BORDER};
+            border-radius: 3px;
+        }}
+        QSlider::sub-page:vertical {{
+            background: {INPUT_BG};
+            border-radius: 3px;
+        }}
+        QSlider::add-page:vertical {{
+            background: {PROGRESS_BG};
+            border-radius: 3px;
+        }}
+        QSlider::handle:vertical {{
+            background: {ACCENT};
+            border: 1px solid {TEXT};
+            width: 16px;
+            height: 16px;
+            margin: 0 -6px;
+            border-radius: 8px;
+        }}
+        QSlider::handle:vertical:hover {{
+            background: {PROGRESS_BG};
+        }}
+        QGroupBox {{
+            background: {PANEL_BG};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 6px;
+            margin-top: 12px;
+            padding: 8px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            color: {MUTED_TEXT};
+            background: {PANEL_BG};
+        }}
+        QStatusBar {{
+            background: {PANEL_BG};
+            color: {MUTED_TEXT};
+            border-top: 1px solid {SOFT_BORDER};
+        }}
+    """
+
+
+def apply_app_theme(app):
+    qdarktheme.setup_theme("dark")
+    base_stylesheet = app.styleSheet()
+
+    palette = app.palette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(WINDOW_BG))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Base, QColor(INPUT_BG))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(PANEL_BG))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(PANEL_BG))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Text, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.Button, QColor(BUTTON_BG))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(TEXT))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(MUTED_TEXT))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(SELECTION_BG))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(DISABLED_TEXT))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(DISABLED_TEXT))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(DISABLED_TEXT))
+    app.setPalette(palette)
+    app.setStyleSheet(f"{base_stylesheet}\n{build_theme_stylesheet()}")
 
 os.environ["HF_HOME"] = MODEL_DIR
 os.environ["HF_HUB_CACHE"] = MODEL_DIR
@@ -553,7 +995,6 @@ class WhisperApp(QMainWindow):
 
         self.build_menu_bar()
         self.build_ui()
-        self.apply_dark_theme()
 
     def build_menu_bar(self):
         menu_bar = QMenuBar(self)
@@ -578,316 +1019,6 @@ class WhisperApp(QMainWindow):
         help_menu.addSeparator()
         help_menu.addAction(supported_formats_action)
         help_menu.addAction(credits_action)
-
-    def apply_dark_theme(self):
-        dropdown_arrow_path = DROPDOWN_ARROW_PATH.replace("\\", "/")
-        checkbox_check_path = CHECKBOX_CHECK_PATH.replace("\\", "/")
-        stylesheet = (
-            """
-            * {
-                font-family: "Segoe UI", "Arial", sans-serif;
-                font-size: 13px;
-            }
-            QMainWindow, QDialog, QWidget#centralWidget {
-                background: #17191d;
-                color: #edf2f7;
-                font-size: 13px;
-            }
-            QWidget {
-                color: #edf2f7;
-                font-size: 13px;
-            }
-            QMenuBar {
-                background: #20242a;
-                color: #edf2f7;
-                padding: 2px;
-                min-height: 24px;
-            }
-            QMenuBar::item {
-                background: transparent;
-                padding: 5px 10px;
-                border-radius: 4px;
-            }
-            QMenuBar::item:selected {
-                background: #2b3138;
-            }
-            QMenu {
-                background: #252b32;
-                color: #edf2f7;
-                border: 1px solid #3b4450;
-                border-radius: 6px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 30px 6px 14px;
-                min-height: 20px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background: #2a75ad;
-                color: #ffffff;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: #3b4450;
-                margin: 4px 6px;
-            }
-            QFrame {
-                background: #24282e;
-                border-radius: 8px;
-            }
-            QFrame#card {
-                background: #24282e;
-                border-radius: 14px;
-            }
-            QFrame#innerCard {
-                background: #2c3239;
-                border-radius: 12px;
-            }
-            QLabel {
-                background: transparent;
-            }
-            QLabel#title {
-                font-size: 18px;
-                font-weight: 700;
-                color: #ffffff;
-            }
-            QLabel#sectionLabel {
-                color: #ffffff;
-                font-weight: 600;
-            }
-            QLabel#bold {
-                font-weight: 700;
-                color: #ffffff;
-            }
-            QLabel#muted {
-                color: #a8b2be;
-            }
-            QLabel#statusLabel {
-                color: #d6dee8;
-                background: #252b32;
-                border-radius: 6px;
-                padding: 6px 8px;
-            }
-            QPushButton {
-                background: #2a75ad;
-                color: #ffffff;
-                border: none;
-                border-radius: 6px;
-                padding: 7px 12px;
-                min-height: 18px;
-            }
-            QPushButton:hover {
-                background: #3283c0;
-            }
-            QPushButton:pressed {
-                background: #216394;
-            }
-            QPushButton:disabled {
-                background: #3b434d;
-                color: #8d98a5;
-            }
-            QPushButton#helpButton {
-                background: #3b434d;
-                color: #dce4ee;
-                border: 1px solid #505b68;
-                border-radius: 11px;
-                padding: 0;
-                min-height: 0;
-                font-weight: 700;
-            }
-            QPushButton#helpButton:hover {
-                background: #46515e;
-                border: 1px solid #637181;
-            }
-            QPushButton#helpButton:pressed {
-                background: #323a43;
-            }
-            QLineEdit, QComboBox, QTextEdit {
-                background: #2f353d;
-                color: #edf2f7;
-                border: 1px solid #46515d;
-                border-radius: 6px;
-                padding: 6px 8px;
-                selection-background-color: #2a75ad;
-                selection-color: #ffffff;
-            }
-            QLineEdit:hover, QComboBox:hover, QTextEdit:hover {
-                border: 1px solid #586573;
-                background: #343b44;
-            }
-            QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
-                border: 1px solid #4694cd;
-                background: #343b44;
-            }
-            QLineEdit, QComboBox {
-                min-height: 20px;
-            }
-            QComboBox {
-                padding: 6px 34px 6px 8px;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 30px;
-                border-left: 1px solid #46515d;
-                border-top-right-radius: 6px;
-                border-bottom-right-radius: 6px;
-                background: #343b44;
-            }
-            QComboBox::drop-down:hover {
-                background: #3c4651;
-            }
-            QComboBox::down-arrow {
-                image: url("__DROPDOWN_ARROW_PATH__");
-                width: 10px;
-                height: 6px;
-                margin: 0;
-            }
-            QComboBox:disabled, QLineEdit:disabled, QTextEdit:disabled {
-                background: #293039;
-                color: #8d98a5;
-                border: 1px solid #3c4651;
-            }
-            QComboBox QAbstractItemView {
-                background: #2f353d;
-                color: #edf2f7;
-                border: 1px solid #46515d;
-                border-radius: 6px;
-                selection-background-color: #2a75ad;
-                selection-color: #ffffff;
-                outline: 0;
-                padding: 4px;
-            }
-            QComboBox QAbstractItemView::item {
-                min-height: 22px;
-                padding: 4px 8px;
-            }
-            QTextEdit {
-                padding: 8px;
-            }
-            QTextEdit:read-only {
-                background: #2f353d;
-            }
-            QCheckBox {
-                background: transparent;
-                spacing: 8px;
-                padding: 4px 0;
-                min-height: 20px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid #6b7786;
-                background: #2f353d;
-            }
-            QCheckBox::indicator:hover {
-                border: 1px solid #818f9f;
-                background: #37404a;
-            }
-            QCheckBox::indicator:checked {
-                background: #2a75ad;
-                border: 1px solid #4694cd;
-                image: url("__CHECKBOX_CHECK_PATH__");
-            }
-            QCheckBox::indicator:disabled {
-                background: #303842;
-                border: 1px solid #4e5a66;
-            }
-            QScrollBar:vertical {
-                background: #252b32;
-                width: 12px;
-                margin: 0;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:vertical {
-                background: #5d6976;
-                min-height: 24px;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #717e8d;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-                border: none;
-                background: transparent;
-            }
-            QScrollBar:horizontal {
-                background: #252b32;
-                height: 12px;
-                margin: 0;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #5d6976;
-                min-width: 24px;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #717e8d;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0;
-                border: none;
-                background: transparent;
-            }
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #3b4450;
-                border-radius: 3px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #2a75ad;
-                border-radius: 3px;
-            }
-            QSlider::add-page:horizontal {
-                background: #3b4450;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #e8eef6;
-                border: 2px solid #2a75ad;
-                width: 16px;
-                height: 16px;
-                margin: -6px 0;
-                border-radius: 8px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #ffffff;
-                border: 2px solid #4694cd;
-            }
-            QSlider::groove:vertical {
-                width: 6px;
-                background: #3b4450;
-                border-radius: 3px;
-            }
-            QSlider::sub-page:vertical {
-                background: #3b4450;
-                border-radius: 3px;
-            }
-            QSlider::add-page:vertical {
-                background: #2a75ad;
-                border-radius: 3px;
-            }
-            QSlider::handle:vertical {
-                background: #e8eef6;
-                border: 2px solid #2a75ad;
-                width: 16px;
-                height: 16px;
-                margin: 0 -6px;
-                border-radius: 8px;
-            }
-            QSlider::handle:vertical:hover {
-                background: #ffffff;
-                border: 2px solid #4694cd;
-            }
-            """
-        )
-        stylesheet = stylesheet.replace("__DROPDOWN_ARROW_PATH__", dropdown_arrow_path)
-        stylesheet = stylesheet.replace("__CHECKBOX_CHECK_PATH__", checkbox_check_path)
-        self.setStyleSheet(stylesheet)
 
     def show_best_accuracy_info(self):
         InfoDialog(
@@ -1346,12 +1477,22 @@ class WhisperApp(QMainWindow):
             "Video files (*.mp4 *.mkv *.mov *.avi *.webm *.mpeg *.mpg *.m4v);;"
             "All files (*.*)"
         )
-        path, _ = QFileDialog.getOpenFileName(self, "Select Input File", "", filter_text)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Input File",
+            "",
+            filter_text,
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
         if path:
             self.set_input_file(path)
 
     def pick_output(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Folder",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
         if path:
             self.output_path.set(path)
             self.output_entry.setText(path)
@@ -1817,6 +1958,7 @@ class WhisperApp(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    apply_app_theme(app)
     window = WhisperApp()
     window.show()
     sys.exit(app.exec())
