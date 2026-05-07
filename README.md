@@ -5,9 +5,11 @@
 [Download Here](https://github.com/notstpa/SmartCaption/releases)
 
 # New This Update
-- **Updated UI**: Refreshed interface with cleaner controls, improved spacing, and a smoother workflow.
-- **Accuracy Tweaks**: Improved transcription settings and subtitle generation behavior for better results.
-- **More Consistent Subtitle Output**: Better subtitle timing and splitting behavior for cleaner `.srt` files.
+- **Output Tab**: Preview subtitles after transcription, edit inline, and export when ready.
+- **Profanity Filter**: Automatically censors profanity in generated subtitles.
+- **Gap Fill**: Fills silent gaps for smoother subtitle output.
+- **CUDA Support**: GPU acceleration on supported NVIDIA hardware for faster transcription.
+- **Native File Dialogs**: Input and output pickers now use the Windows file browser.
 
 # Features
 - **Subtitle Generation**: Create `.srt` subtitles from audio and video files.
