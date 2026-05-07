@@ -4,3 +4,6 @@ faster-whisper>=1.2.1
 huggingface_hub>=1.10.2
 av>=17.0.0
 ctranslate2>=4.7.1
+
+# Optional: required for CUDA GPU acceleration
+nvidia-cudnn-cu12
