@@ -4,7 +4,3 @@ faster-whisper>=1.2.1
 huggingface_hub>=1.10.2
 av>=17.0.0
 ctranslate2>=4.7.1
-numpy>=2.4.4
-tokenizers>=0.22.2
-tqdm>=4.67.3
-pyinstaller>=6.0

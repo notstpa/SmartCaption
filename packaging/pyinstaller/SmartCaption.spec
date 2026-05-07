@@ -31,7 +31,7 @@ icon_path = os.path.join(BASE_DIR, "icon.ico")
 if not os.path.exists(icon_path):
     icon_path = None
 
-for package_name in ("faster_whisper",):
+for package_name in ("faster_whisper", "pyqtdarktheme"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package_name)
     datas += pkg_datas
     binaries += pkg_binaries

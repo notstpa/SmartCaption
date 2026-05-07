@@ -52,7 +52,7 @@ echo Version set to %APP_VERSION%.
 exit /b 0
 
 :ensure_python_deps
-python -m pip install pyinstaller PyQt6 faster-whisper huggingface_hub av ctranslate2 numpy tokenizers tqdm
+python -m pip install pyinstaller PyQt6 pyqtdarktheme faster-whisper huggingface_hub av ctranslate2
 if errorlevel 1 (
     echo.
     echo Failed to install build dependencies.
