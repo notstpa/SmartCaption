@@ -160,8 +160,8 @@ cls
 echo ========================================
 echo   Cleaning Build Folders
 echo ========================================
-if exist build rmdir /s /q build 2>nul
-if exist releases rmdir /s /q releases 2>nul
+if exist build rmdir /s /q build
+if exist releases rmdir /s /q releases
 echo.
 echo Clean complete.
 echo.
