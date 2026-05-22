@@ -1,6 +1,6 @@
-# SmartCaption v2.1.0
+# SmartCaption v2.1.1
 
-![SmartCaption](https://i.imgur.com/ZlAXIdx.png)
+![SmartCaption](https://i.imgur.com/KnYr419.png)
 
 [Download Here](https://github.com/notstpa/SmartCaption/releases)
 
