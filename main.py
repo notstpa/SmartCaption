@@ -465,6 +465,9 @@ def build_theme_stylesheet():
             min-height: 20px;
             border: none;
         }}
+        QCheckBox:hover, QRadioButton:hover {{
+            text-decoration: none;
+        }}
         QCheckBox:disabled, QRadioButton:disabled {{
             color: {DISABLED_TEXT};
         }}
