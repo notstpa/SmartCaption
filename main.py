@@ -463,17 +463,27 @@ def build_theme_stylesheet():
             spacing: 8px;
             padding: 4px 0;
             min-height: 20px;
-            border: none;
+            border-top: 2px solid transparent;
+            border-bottom: 2px solid transparent;
+            border-left: none;
+            border-right: none;
         }}
         QCheckBox:hover, QRadioButton:hover {{
-            text-decoration: none;
+            border-bottom: 2px solid transparent;
+        }}
+        QCheckBox:focus, QRadioButton:focus {{
+            outline: none;
+            border-top: 2px solid transparent;
+            border-bottom: 2px solid transparent;
+            border-left: none;
+            border-right: none;
         }}
         QCheckBox:disabled, QRadioButton:disabled {{
             color: {DISABLED_TEXT};
         }}
         QCheckBox::indicator, QRadioButton::indicator {{
-            width: 16px;
-            height: 16px;
+            width: 18px;
+            height: 18px;
             border: 1px solid {BORDER};
             background: {INPUT_BG};
         }}
@@ -488,8 +498,7 @@ def build_theme_stylesheet():
             background: {BUTTON_HOVER_BG};
         }}
         QCheckBox::indicator:checked {{
-            background: {SELECTION_BG};
-            border: 1px solid {ACCENT};
+            border: 1px solid transparent;
         }}
         QRadioButton::indicator:checked {{
             background: {SELECTION_BG};
@@ -659,7 +668,7 @@ def build_theme_stylesheet():
 
 
 def apply_app_theme(app):
-    qdarktheme.setup_theme("dark")
+    qdarktheme.setup_theme("dark", custom_colors={"primary": "#5294FF"})
     base_stylesheet = app.styleSheet()
 
     palette = app.palette()
