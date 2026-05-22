@@ -1129,7 +1129,7 @@ class WhisperApp(QMainWindow):
         self.beam_size = StateValue(5)
         self.no_speech_threshold = StateValue(0.8)
         self.condition_on_previous_text = StateValue(False)
-        self.use_gpu = StateValue(True)
+        self.use_gpu = StateValue(False)
         self.preset = StateValue("Normal")
         self.pause_threshold = StateValue(0.5)
         self.max_subtitle_duration = StateValue(3.2)
@@ -2212,7 +2212,7 @@ class WhisperApp(QMainWindow):
             "beam_size": 5,
             "no_speech_threshold": 0.8,
             "condition_on_previous_text": False,
-            "use_gpu": True,
+            "use_gpu": False,
             "pause_threshold": 0.5,
         }
 
