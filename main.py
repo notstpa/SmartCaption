@@ -37,7 +37,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
-    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -211,10 +210,9 @@ def resolve_model_dir(app_dir):
 
 APP_DIR = get_app_dir()
 try:
-    MODEL_DIR, MODEL_DIR_MODE = resolve_model_dir(APP_DIR)
+    MODEL_DIR, _ = resolve_model_dir(APP_DIR)
 except OSError as e:
     MODEL_DIR = None
-    MODEL_DIR_MODE = None
     MODEL_DIR_ERROR = str(e)
 else:
     MODEL_DIR_ERROR = None
@@ -822,8 +820,6 @@ class InfoDialog(QDialog):
 class AdvancedOptionsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent = parent
-
         self._parent = parent
 
         self.setWindowTitle("Advanced Options")
@@ -974,6 +970,7 @@ class AdvancedOptionsDialog(QDialog):
         self._parent.no_speech_threshold.set(defaults["no_speech_threshold"])
         self._parent.condition_on_previous_text.set(defaults["condition_on_previous_text"])
         self._parent.use_gpu.set(defaults["use_gpu"])
+        self._parent.pause_threshold.set(defaults["pause_threshold"])
         self.beam_size_menu.setCurrentText(self.format_option_value(defaults["beam_size"]))
         self.no_speech_menu.setCurrentText(self.format_option_value(defaults["no_speech_threshold"]))
         self.condition_toggle.setChecked(defaults["condition_on_previous_text"])
@@ -987,7 +984,6 @@ class CaptionPreviewWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.subtitle_segments = []
-        self.total_duration = 0.0
         self.current_time = 0.0
         self.scale_percent = 100
         self.aspect_ratio = 9.0 / 16.0
@@ -1004,7 +1000,6 @@ class CaptionPreviewWidget(QWidget):
 
     def set_subtitles(self, segments):
         self.subtitle_segments = segments or []
-        self.total_duration = segments[-1]["end"] if segments else 0.0
         self.update()
 
     def set_current_time(self, seconds):
@@ -1162,9 +1157,9 @@ class WhisperApp(QMainWindow):
         self._cached_model = None
         self._cached_model_name = None
         self._cached_model_device = None
+        self._cached_model_compute_type = None
 
         self.subtitle_segments = StateValue([])
-        self.total_duration = StateValue(0.0)
         self.is_preview_playing = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setInterval(50)
@@ -1172,7 +1167,6 @@ class WhisperApp(QMainWindow):
 
         self._media_player = None
         self._audio_output = None
-        self._audio_devices = []
         self._selected_audio_device = None
         self._audio_menu = None
         self._suppress_slider_update = False
@@ -1425,6 +1419,12 @@ class WhisperApp(QMainWindow):
         self.max_words_entry.textChanged.connect(self.max_words_per_subtitle.set)
         self.max_words_entry.textChanged.connect(self._validate_numeric_inputs)
         timing_layout.addWidget(self.max_words_entry, 3, 1)
+        self.max_chars_label = QLabel("Max chars/line")
+        timing_layout.addWidget(self.max_chars_label, 4, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.max_chars_entry = QLineEdit(self.max_chars_per_line.get())
+        self.max_chars_entry.textChanged.connect(self.max_chars_per_line.set)
+        self.max_chars_entry.textChanged.connect(self._validate_numeric_inputs)
+        timing_layout.addWidget(self.max_chars_entry, 4, 1)
         timing_layout.setColumnStretch(1, 1)
         timing_layout.setRowStretch(5, 1)
         options_layout.addWidget(timing_frame, 0, 1)
@@ -1531,13 +1531,25 @@ class WhisperApp(QMainWindow):
             self.max_subtitle_duration.set(3.2)
             self.vad_silence_ms.set(700)
             self.break_on_punctuation_immediate.set(False)
+            self.max_words_per_subtitle.set("8")
+            self.max_chars_per_line.set("42")
+            self.gap_fill.set(False)
+            self.max_words_entry.setText("8")
+            self.max_chars_entry.setText("42")
+            self.gap_fill_checkbox.setChecked(False)
             self.log("Preset: Normal - balanced subtitle pacing.")
         elif choice == "TikTok":
             self.pause_threshold.set(0.5)
             self.max_subtitle_duration.set(2.0)
             self.vad_silence_ms.set(500)
             self.break_on_punctuation_immediate.set(True)
-            self.log("Preset: TikTok - faster subtitle pacing for short-form video.")
+            self.max_words_per_subtitle.set("2")
+            self.max_chars_per_line.set("20")
+            self.gap_fill.set(True)
+            self.max_words_entry.setText("2")
+            self.max_chars_entry.setText("20")
+            self.gap_fill_checkbox.setChecked(True)
+            self.log("Preset: TikTok - 1-2 words per subtitle, gap-filled for continuous display.")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
@@ -1633,6 +1645,7 @@ class WhisperApp(QMainWindow):
             self.text_case_menu,
             self.language_menu,
             self.max_words_entry,
+            self.max_chars_entry,
             self.gap_fill_checkbox,
             self.censor_profanity_checkbox,
         ):
@@ -1884,7 +1897,6 @@ class WhisperApp(QMainWindow):
 
         self._sync_checkbox = QCheckBox("Sync")
         self._sync_checkbox.setChecked(True)
-        self._sync_checkbox.installEventFilter(self)
         footer_layout.addWidget(self._sync_checkbox)
         footer_layout.addStretch(1)
         self._export_btn = QPushButton("Export SRT")
@@ -1899,7 +1911,6 @@ class WhisperApp(QMainWindow):
         self.subtitle_segments.set(segments)
         self._preview_widget.set_subtitles(segments)
         total = segments[-1]["end"] if segments else 0.0
-        self.total_duration.set(total)
         total_ms = int(total * 1000)
         self._preview_slider.setMaximum(max(1, total_ms))
         self._preview_slider.setValue(0)
@@ -1979,17 +1990,17 @@ class WhisperApp(QMainWindow):
 
     def _refresh_audio_devices(self):
         self._audio_menu.clear()
-        self._audio_devices = QMediaDevices.audioOutputs()
+        audio_devices = QMediaDevices.audioOutputs()
         default_device = QMediaDevices.defaultAudioOutput()
 
-        if not self._audio_devices:
+        if not audio_devices:
             action = self._audio_menu.addAction("No devices found")
             action.setEnabled(False)
             self._audio_menu.setEnabled(False)
             return
 
         selected = default_device
-        for device in self._audio_devices:
+        for device in audio_devices:
             action = self._audio_menu.addAction(device.description())
             action.setCheckable(True)
             if self._saved_audio_device_desc and device.description() == self._saved_audio_device_desc:
@@ -2013,6 +2024,7 @@ class WhisperApp(QMainWindow):
         if sender:
             sender.setChecked(True)
         self._selected_audio_device = device
+        self._saved_audio_device_desc = device.description()
         if self._media_player and self._media_player.source().isValid():
             self.on_audio_device_changed(device)
 
@@ -2332,6 +2344,13 @@ class WhisperApp(QMainWindow):
             self.max_words_entry.setStyleSheet("")
         except (ValueError, AttributeError):
             self.max_words_entry.setStyleSheet(invalid_style)
+        try:
+            val = int(self.max_chars_per_line.get().strip())
+            if val < 1:
+                raise ValueError
+            self.max_chars_entry.setStyleSheet("")
+        except (ValueError, AttributeError):
+            self.max_chars_entry.setStyleSheet(invalid_style)
 
     def set_input_file(self, path):
         self.input_path.set(path)
@@ -2489,10 +2508,12 @@ class WhisperApp(QMainWindow):
 
             use_gpu = subtitle_settings.get("use_gpu", False)
             desired_device = "cuda" if use_gpu else "cpu"
+            desired_compute_type = "float16" if use_gpu else "int8"
 
             if (self._cached_model is None
                     or self._cached_model_name != model_name
-                    or self._cached_model_device != desired_device):
+                    or self._cached_model_device != desired_device
+                    or self._cached_model_compute_type != desired_compute_type):
                 if use_gpu:
                     try:
                         self._cached_model = WhisperModel(
@@ -2502,6 +2523,7 @@ class WhisperApp(QMainWindow):
                             local_files_only=True,
                         )
                         self._cached_model_device = "cuda"
+                        self._cached_model_compute_type = "float16"
                         self.log("Using GPU (CUDA) for transcription.")
                     except Exception:
                         self.log("GPU runtime not found, using CPU instead.")
@@ -2512,6 +2534,7 @@ class WhisperApp(QMainWindow):
                             local_files_only=True,
                         )
                         self._cached_model_device = "cpu"
+                        self._cached_model_compute_type = "int8"
                 else:
                     self._cached_model = WhisperModel(
                         model_path,
@@ -2520,6 +2543,7 @@ class WhisperApp(QMainWindow):
                         local_files_only=True,
                     )
                     self._cached_model_device = "cpu"
+                    self._cached_model_compute_type = "int8"
                 self._cached_model_name = model_name
             model = self._cached_model
             self.log(f"Model loaded. Processing audio... (device: {self._cached_model_device})")
@@ -2536,15 +2560,16 @@ class WhisperApp(QMainWindow):
                     language=subtitle_settings["language_code"],
                     beam_size=subtitle_settings["beam_size"],
                     temperature=0.0,
-                    compression_ratio_threshold=2.4,
-                    log_prob_threshold=-1.0,
+                    compression_ratio_threshold=1.8,
+                    log_prob_threshold=-0.5,
                     no_speech_threshold=subtitle_settings["no_speech_threshold"],
                     condition_on_previous_text=subtitle_settings["condition_on_previous_text"],
                     word_timestamps=use_word_timestamps,
                     vad_filter=True,
                     vad_parameters={
                         "min_silence_duration_ms": subtitle_settings["vad_silence_ms"],
-                        "speech_pad_ms": 200,
+                        "min_speech_duration_ms": 100,
+                        "speech_pad_ms": 400,
                     },
                 )
                 return gen
@@ -2564,6 +2589,7 @@ class WhisperApp(QMainWindow):
                         local_files_only=True,
                     )
                     self._cached_model_device = "cpu"
+                    self._cached_model_compute_type = "int8"
                     self._cached_model_name = model_name
                     model = self._cached_model
                     if self._cancel_event.is_set():
@@ -2700,7 +2726,7 @@ class WhisperApp(QMainWindow):
 
         for segment in subtitle_segments:
             start = max(float(segment["start"]), previous_end)
-            end = max(float(segment["end"]), start + 0.25)
+            end = max(float(segment["end"]), start + 0.05)
             text = segment["text"]
 
             if normalized_segments:
@@ -2736,14 +2762,37 @@ class WhisperApp(QMainWindow):
             if not word_text or word_start is None or word_end is None:
                 continue
 
+            # Pause-based split: flush on long silence between words.
             if current_words:
                 previous_word_end = getattr(current_words[-1], "end", None)
                 if previous_word_end is not None and word_start - previous_word_end >= subtitle_settings["pause_threshold"]:
                     subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
                     current_words = []
 
+            # Line-overflow pre-check: if adding this word would produce more than
+            # 2 wrapped lines, commit the current batch first so the overflowing
+            # word starts the next subtitle rather than spilling into a 3rd line.
+            if current_words:
+                test_text = self.join_words(current_words + [word])
+                if len(self.wrap_subtitle_lines(test_text, subtitle_settings)) > 2:
+                    subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
+                    current_words = []
+
             current_words.append(word)
-            if self.should_break_subtitle(current_words, subtitle_settings):
+
+            # Hard limits (post-add): the subtitle being built includes this word.
+            last_word_text = current_words[-1].word.strip()
+
+            if len(current_words) >= subtitle_settings["max_words"]:
+                subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
+                current_words = []
+            elif current_words[-1].end - current_words[0].start >= subtitle_settings["max_subtitle_duration"]:
+                subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
+                current_words = []
+            elif subtitle_settings["break_on_punctuation_immediate"] and last_word_text.endswith((".", "!", "?")):
+                subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
+                current_words = []
+            elif not subtitle_settings["break_on_punctuation_immediate"] and len(current_words) >= 3 and last_word_text.endswith((".", "!", "?", ",")):
                 subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
                 current_words = []
 
@@ -2751,28 +2800,6 @@ class WhisperApp(QMainWindow):
             subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
 
         return [seg for seg in subtitle_segments if seg is not None]
-
-    def should_break_subtitle(self, words, subtitle_settings):
-        if not words:
-            return False
-
-        last_word = words[-1].word.strip()
-
-        if len(words) >= subtitle_settings["max_words"]:
-            return True
-        if words[-1].end - words[0].start >= subtitle_settings["max_subtitle_duration"]:
-            return True
-        if subtitle_settings["break_on_punctuation_immediate"]:
-            if last_word.endswith((".", "!", "?")):
-                return True
-        elif len(words) >= 3 and last_word.endswith((".", "!", "?", ",")):
-            return True
-
-        text = self.join_words(words)
-        if len(self.wrap_subtitle_lines(text, subtitle_settings)) > 2:
-            return True
-
-        return False
 
     def create_subtitle_from_words(self, words, subtitle_settings):
         text = self.join_words(words)
