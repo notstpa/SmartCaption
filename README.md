@@ -1,4 +1,4 @@
-# SmartCaption v2.1.1
+# SmartCaption v2.2.2
 
 ![SmartCaption](https://i.imgur.com/KnYr419.png)
 
