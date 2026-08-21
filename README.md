@@ -1,9 +1,4 @@
-<<<<<<< HEAD
 # SmartCaption v2.2.3
-=======
-# SmartCaption v2.2.2
->>>>>>> a90481a822b8cf229d4019916fba885caaa7286d
-
 ![SmartCaption](https://i.imgur.com/KnYr419.png)
 
 [Download Here](https://github.com/notstpa/SmartCaption/releases)
