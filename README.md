@@ -1,5 +1,5 @@
 # SmartCaption v2.2.3
-![SmartCaption](https://i.imgur.com/KnYr419.png)
+![SmartCaption](https://i.imgur.com/yQDtMjF.png)
 
 [Download Here](https://github.com/notstpa/SmartCaption/releases)
 
