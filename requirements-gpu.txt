@@ -1,0 +1,7 @@
+# Optional CUDA acceleration for NVIDIA GPUs.
+# Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements-gpu.txt
+#
+# Not needed for CPU transcription. SmartCaption falls back to CPU
+# automatically when no compatible GPU runtime is found.
+nvidia-cudnn-cu12

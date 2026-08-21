@@ -4,21 +4,35 @@ import site
 import shutil
 import stat
 import bisect
+import gc
+import io
+import re
+import time
+import traceback
 
 if sys.platform == "win32":
-    for _site_dir in site.getsitepackages():
-        _nvidia_dir = os.path.join(_site_dir, "nvidia")
-        if os.path.isdir(_nvidia_dir):
-            for _pkg in os.listdir(_nvidia_dir):
-                _bin_dir = os.path.join(_nvidia_dir, _pkg, "bin")
-                if os.path.isdir(_bin_dir):
-                    os.add_dll_directory(_bin_dir)
-                    os.environ["PATH"] = _bin_dir + os.pathsep + os.environ.get("PATH", "")
+    # Best-effort: this only makes pip-installed CUDA libraries findable. It
+    # runs before the crash handler is installed, so anything raised here would
+    # kill the windowed exe with no window and no log -- indistinguishable from
+    # "the app won't start". Losing GPU support is the acceptable failure.
+    try:
+        for _site_dir in site.getsitepackages():
+            _nvidia_dir = os.path.join(_site_dir, "nvidia")
+            if os.path.isdir(_nvidia_dir):
+                for _pkg in os.listdir(_nvidia_dir):
+                    _bin_dir = os.path.join(_nvidia_dir, _pkg, "bin")
+                    if os.path.isdir(_bin_dir):
+                        os.add_dll_directory(_bin_dir)
+                        os.environ["PATH"] = _bin_dir + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass
 import threading
 from datetime import datetime
 
-from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPen
+from PyQt6.QtCore import (
+    QEvent, QObject, QRect, QSettings, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
+)
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPalette, QPen
 from PyQt6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -34,6 +48,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenuBar,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -47,10 +62,55 @@ from PyQt6.QtWidgets import (
 from faster_whisper import WhisperModel
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
+from tqdm.auto import tqdm as base_tqdm
 import qdarktheme
 
+_ALPHA_RUN_RE = re.compile(r"[a-zA-Z]+")
+
 APP_NAME = "SmartCaption"
-MODEL_REPO_PREFIX = "Systran/faster-whisper-"
+APP_VERSION = "2.2.3"
+
+# Explicit repo per model rather than a shared prefix: Systran publishes no
+# turbo build, so that one comes from a different publisher.
+MODEL_REPOS = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "large-v3-turbo": "deepdml/faster-whisper-large-v3-turbo-ct2",
+}
+
+# Approximate on-disk size, used for the free-space check and the UI hint.
+MODEL_SIZES_MB = {
+    "tiny": 75,
+    "base": 145,
+    "small": 484,
+    "medium": 1530,
+    "large-v3": 3090,
+    "large-v3-turbo": 1620,
+}
+
+# Decoding quality knobs. These match faster-whisper's own defaults and are
+# deliberately not tightened: the thresholds only do useful work while
+# temperature fallback is available to retry a failed window.
+TEMPERATURE_FALLBACK = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+COMPRESSION_RATIO_THRESHOLD = 2.4
+LOG_PROB_THRESHOLD = -1.0
+HALLUCINATION_SILENCE_THRESHOLD = 2.0
+
+# Subtitle timing rules, in seconds unless noted.
+MIN_SUBTITLE_DURATION = 0.9
+MIN_SUBTITLE_GAP = 0.04
+MAX_GAP_FILL = 2.0
+MAX_CHARS_PER_SECOND = 20.0
+MAX_SUBTITLE_LINES = 2
+
+AUTO_DETECT_LANGUAGE = "Auto-detect"
+
+# How long to let a worker finish on shutdown before exiting the hard way.
+WORKER_SHUTDOWN_TIMEOUT_MS = 5000
+MAX_LOG_BYTES = 2 * 1024 * 1024
 SUPPORTED_MEDIA_EXTENSIONS = (
     ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".wma",
     ".mp4", ".mkv", ".mov", ".avi", ".webm", ".mpeg", ".mpg", ".m4v"
@@ -194,6 +254,38 @@ def ensure_writable_dir(path):
         return True
     except OSError:
         return False
+
+
+def resolve_log_file(app_dir):
+    """Pick a writable log location, preferring one beside the app.
+
+    Returns None only if neither location can be written, in which case the app
+    still runs and simply logs to the on-screen box alone.
+    """
+    for candidate in (os.path.join(app_dir, "logs"),
+                      os.path.join(get_user_data_dir(), "logs")):
+        if ensure_writable_dir(candidate):
+            log_path = os.path.join(candidate, "smartcaption.log")
+            rotate_log_if_needed(log_path)
+            return log_path
+    return None
+
+
+def rotate_log_if_needed(log_path):
+    """Keep one previous log so the file cannot grow without bound."""
+    try:
+        if os.path.getsize(log_path) < MAX_LOG_BYTES:
+            return
+    except OSError:
+        return
+
+    previous = log_path + ".1"
+    try:
+        if os.path.exists(previous):
+            os.remove(previous)
+        os.replace(log_path, previous)
+    except OSError:
+        pass
 
 
 def resolve_model_dir(app_dir):
@@ -692,10 +784,278 @@ def apply_app_theme(app):
 if MODEL_DIR is not None:
     os.environ["HF_HOME"] = MODEL_DIR
     os.environ["HF_HUB_CACHE"] = MODEL_DIR
-    os.environ["TRANSFORMERS_CACHE"] = MODEL_DIR
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 disable_progress_bars()
+
+
+# ── Subtitle text and timing pipeline ──
+# Deliberately free of Qt and of any app state: everything below is a pure
+# function of its arguments, which is what makes it directly testable.
+
+PROFANITY_LIST = {
+    "fuck", "fucker", "fucked", "fucking", "fuckin", "fucks",
+    "motherfuck", "motherfucker", "motherfuckers", "motherfucking",
+    "shit", "shits", "shitting", "shitty",
+    "bitch", "bitches", "bitching",
+    "ass", "asses", "asshole", "assholes",
+    "bastard", "bastards",
+    "cunt", "cunts",
+    "dick", "dicks",
+    "cock", "cocks",
+    "pussy", "pussies",
+    "whore", "whores",
+    "piss", "pissed", "pissing",
+    "damn", "damned",
+    "crap", "craps",
+    "slut", "sluts",
+    "prick", "pricks",
+    "wanker", "wankers", "wank",
+    "twat", "twats",
+    "bollocks", "bullshit",
+}
+
+
+def censor_word(word):
+    """Mask a profane word, leaving surrounding punctuation intact.
+
+    Masking the raw token would eat the punctuation too, turning "damn," into
+    "d****" and losing the comma.
+
+    Each run of letters is judged on its own rather than the token's letters
+    stripped of punctuation. Stripping first cannot tell "damn," from "d.a.m.n",
+    so it would splice a mask over text that was never a single word -- and it
+    misses compounds like "fuck-you", where the profanity is one run of several.
+    """
+
+    def mask(match):
+        run = match.group()
+        if run.lower() not in PROFANITY_LIST:
+            return run
+        return run[0] + "*" * (len(run) - 1)
+
+    return _ALPHA_RUN_RE.sub(mask, word)
+
+
+def join_words(words):
+    return "".join(word.word for word in words).strip()
+
+
+def format_srt_timestamp(seconds):
+    # Round rather than truncate, and never go below zero: a negative value
+    # would format as "-1:59:59,500", which no SRT parser accepts.
+    ms = max(0, int(round(seconds * 1000)))
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    ms %= 1000
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+def normalize_subtitle_text(text, subtitle_settings):
+    if not text:
+        return ""
+
+    if subtitle_settings.get("censor_profanity"):
+        text = " ".join(censor_word(w) for w in text.split())
+
+    if subtitle_settings["remove_punctuation"]:
+        text = text.translate(str.maketrans("", "", ".,'?!;:\"…"))
+
+    if subtitle_settings["text_case"] == "lowercase":
+        text = text.lower()
+    elif subtitle_settings["text_case"] == "UPPERCASE":
+        text = text.upper()
+
+    return " ".join(text.split())
+
+
+def wrap_text_to_lines(text, max_chars):
+    """Greedy word wrap. Kept free of the case/censor/punctuation rules so
+    manual edits can be re-wrapped without those being re-applied."""
+    if not text:
+        return []
+
+    lines = []
+    current_line = ""
+
+    for word in text.split():
+        if not current_line:
+            current_line = word
+            continue
+
+        candidate_line = f"{current_line} {word}"
+        if len(candidate_line) <= max_chars:
+            current_line = candidate_line
+        else:
+            lines.append(current_line)
+            current_line = word
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines
+
+
+def wrap_subtitle_lines(text, subtitle_settings):
+    normalized_text = normalize_subtitle_text(text, subtitle_settings)
+    return wrap_text_to_lines(normalized_text, subtitle_settings["max_chars"])
+
+
+def format_subtitle_text(text, subtitle_settings):
+    return "\n".join(wrap_subtitle_lines(text, subtitle_settings))
+
+
+def split_segment_text(text, start, end, subtitle_settings):
+    """Break a whole-segment transcription into readable subtitles.
+
+    Used when word timestamps are unavailable, so there are no per-word times to
+    split on. A segment can be a full sentence spanning many lines; without this
+    it would render as one caption tall enough to cover the video. Timings are
+    interpolated by character count, which tracks speech rate closely enough for
+    a fallback path.
+
+    The same word and duration budgets the word-timed path enforces are applied
+    here too. Honouring only the line count would mean a preset -- or the Max
+    words box -- silently did nothing whenever this path ran, and it runs
+    whenever word timing is off *or* Whisper returns no word times for a segment.
+    """
+    normalized_text = normalize_subtitle_text(text, subtitle_settings)
+    words = normalized_text.split()
+    if not words:
+        return []
+
+    max_chars = max(1, int(subtitle_settings["max_chars"]))
+    max_words = subtitle_settings.get("max_words")
+    max_duration = subtitle_settings.get("max_subtitle_duration")
+    duration = max(float(end) - float(start), 0.0)
+    total_chars = len(normalized_text) or 1
+
+    # Grouped word by word, the same way the word-timed path builds a subtitle,
+    # so both produce the same shape from the same settings. Grouping whole
+    # wrapped lines instead would let a wide max_chars hide the word budget
+    # entirely -- 12 words on one 60-char line would never hit a limit of 3.
+    batches = []
+    current = []
+    for word in words:
+        candidate = current + [word]
+        candidate_text = " ".join(candidate)
+        over_words = bool(max_words) and len(candidate) > max_words
+        over_lines = len(wrap_text_to_lines(candidate_text, max_chars)) > MAX_SUBTITLE_LINES
+        over_time = (
+            bool(max_duration)
+            and duration > 0
+            and len(candidate_text) / total_chars * duration > max_duration
+        )
+        # Budgets are only tested against a non-empty batch, so a single word
+        # that busts one on its own is still emitted rather than dropped.
+        if current and (over_words or over_lines or over_time):
+            batches.append(current)
+            current = []
+        current.append(word)
+    if current:
+        batches.append(current)
+
+    chunks = [wrap_text_to_lines(" ".join(batch), max_chars) for batch in batches]
+    if len(chunks) == 1:
+        return [{"start": start, "end": end, "text": "\n".join(chunks[0])}]
+
+    # Timings are apportioned by visible characters, so measure the wrapped
+    # lines rather than the source text: wrapping drops the spaces at each break.
+    line_chars = sum(len(line) for chunk in chunks for line in chunk) or 1
+
+    results = []
+    elapsed = 0.0
+    for position, chunk in enumerate(chunks):
+        chunk_chars = sum(len(line) for line in chunk)
+        chunk_start = start + elapsed
+        elapsed += duration * (chunk_chars / line_chars)
+        # Pin the final end to the real segment end so rounding cannot drift.
+        chunk_end = end if position == len(chunks) - 1 else start + elapsed
+        results.append({
+            "start": chunk_start,
+            "end": chunk_end,
+            "text": "\n".join(chunk),
+        })
+    return results
+
+
+def apply_gap_fill(subtitle_segments):
+    """Bridge short pauses so captions do not flicker between words.
+
+    Only short gaps are bridged. Stretching a caption across a genuine silence --
+    a musical break, a pause between scenes -- would leave stale text frozen on
+    screen for the whole thing.
+    """
+    if len(subtitle_segments) < 2:
+        return subtitle_segments
+
+    result = []
+    for i, seg in enumerate(subtitle_segments):
+        if i < len(subtitle_segments) - 1:
+            next_start = subtitle_segments[i + 1]["start"]
+            gap = next_start - seg["end"]
+            end = next_start if 0 < gap <= MAX_GAP_FILL else seg["end"]
+            result.append({"start": seg["start"], "end": end, "text": seg["text"]})
+        else:
+            result.append(seg)
+    return result
+
+
+def normalize_subtitle_timings(subtitle_segments):
+    """Enforce readable durations without ever overlapping the next subtitle.
+
+    Whisper's raw word timings routinely produce sub-100ms subtitles for short
+    words, which are unreadable. Each subtitle is extended toward whichever is
+    longer -- a minimum on-screen time, or the time needed to read it at
+    MAX_CHARS_PER_SECOND -- but never past the following subtitle's start.
+
+    Returns (segments, gap_warnings) so that reporting stays in the UI layer.
+    """
+    if not subtitle_segments:
+        return [], []
+
+    normalized_segments = []
+    gap_warnings = []
+    previous_end = 0.0
+
+    for index, segment in enumerate(subtitle_segments):
+        start = max(float(segment["start"]), previous_end)
+        end = max(float(segment["end"]), start)
+        text = segment["text"]
+
+        # Longest visible line drives reading time; wrapped lines are read
+        # together, so total character count would overstate the need.
+        char_count = max((len(line) for line in text.split("\n")), default=0)
+        readable_duration = char_count / MAX_CHARS_PER_SECOND
+        desired_end = start + max(MIN_SUBTITLE_DURATION, readable_duration)
+
+        next_start = None
+        if index + 1 < len(subtitle_segments):
+            next_start = float(subtitle_segments[index + 1]["start"])
+
+        if desired_end > end:
+            if next_start is None:
+                end = desired_end
+            else:
+                # Leave a frame-sized gap so the two never collide. The outer
+                # max() keeps this an extension only: when the next subtitle
+                # starts within MIN_SUBTITLE_GAP there is no room to grow, and
+                # the clamp alone would cut the caption below its real end.
+                end = max(
+                    end,
+                    min(desired_end, max(start, next_start - MIN_SUBTITLE_GAP)),
+                )
+
+        if normalized_segments and start - previous_end > 8.0:
+            gap_warnings.append(len(normalized_segments) + 1)
+
+        normalized_segments.append({"start": start, "end": end, "text": text})
+        previous_end = end
+
+    return normalized_segments, gap_warnings
 
 
 class StateValue:
@@ -710,6 +1070,70 @@ class StateValue:
 
     def set(self, value):
         self.value = value
+
+
+def get_free_space_mb(path):
+    """Free megabytes on the volume holding path, or None if it cannot be read."""
+    try:
+        return shutil.disk_usage(path).free / (1024 * 1024)
+    except OSError:
+        return None
+
+
+def format_bytes(num_bytes):
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def make_progress_reporter(on_progress):
+    """Build a tqdm subclass that forwards byte counts to a callback.
+
+    huggingface_hub constructs the progress class itself and relies on the full
+    tqdm interface, including classmethods like get_lock() for its parallel
+    downloads. Subclassing the real thing inherits all of that; a hand-rolled
+    stand-in does not. Rendering is already off via disable_progress_bars().
+    """
+
+    class ProgressReporter(base_tqdm):
+        def __init__(self, *args, **kwargs):
+            # hf_hub creates both byte bars (unit="B") and a file-count bar.
+            # Only the byte bar is worth showing; reporting both would flip the
+            # label between "480 MB" and a meaningless "6 B" file tally.
+            self._tracks_bytes = kwargs.get("unit") == "B"
+            # Must stay "enabled": tqdm's update() returns early when disabled,
+            # so self.n would never advance. Silence comes from display() below.
+            kwargs["disable"] = False
+            kwargs["file"] = io.StringIO()
+            super().__init__(*args, **kwargs)
+            self._report()
+
+        def display(self, *args, **kwargs):
+            # Observed, never rendered -- the app has no console.
+            return True
+
+        def _report(self):
+            if not self._tracks_bytes:
+                return
+            try:
+                on_progress(self.n or 0, self.total or 0)
+            except Exception:
+                # Progress reporting must never break a download.
+                pass
+
+        def update(self, n=1):
+            displayed = super().update(n)
+            self._report()
+            return displayed
+
+        def close(self):
+            super().close()
+            self._report()
+
+    return ProgressReporter
 
 
 def set_window_icon(window):
@@ -824,7 +1248,7 @@ class AdvancedOptionsDialog(QDialog):
 
         self.setWindowTitle("Advanced Options")
         set_window_icon(self)
-        self.setFixedSize(640, 430)
+        self.setMinimumSize(640, 430)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -864,7 +1288,7 @@ class AdvancedOptionsDialog(QDialog):
             container_layout,
             row=1,
             title="No Speech Threshold",
-            help_text="Higher values make Whisper more likely to skip quiet or uncertain sections. Lower values keep more borderline speech, which can help with soft voices but may add junk captions.",
+            help_text="How confident Whisper must be that a section is silent before skipping it. Higher values keep more borderline speech, which helps with soft voices but may add junk captions. Lower values filter more aggressively.",
             values=["0.3", "0.6", "0.8", "1.0"],
             variable=parent.no_speech_threshold,
         )
@@ -882,9 +1306,16 @@ class AdvancedOptionsDialog(QDialog):
             help_text="When enabled, SmartCaption will use your Nvidia GPU (CUDA) for transcription. This is significantly faster and improves accuracy for larger models. Falls back to CPU automatically if no compatible GPU is found.",
             variable=parent.use_gpu,
         )
-        self.pause_threshold_menu = self.add_option_row(
+        self.vad_filter_toggle = self.add_switch_row(
             container_layout,
             row=4,
+            title="Voice Activity Filter",
+            help_text="Removes non-speech audio before transcription, which keeps captions off music and background noise. It runs before Whisper, so if it mistakes quiet or distant speech for silence those words are gone before No Speech Threshold ever applies. Turn it off if whole sentences are missing from soft-spoken audio.",
+            variable=parent.vad_filter,
+        )
+        self.pause_threshold_menu = self.add_option_row(
+            container_layout,
+            row=5,
             title="Pause Threshold (s)",
             help_text="How long a silence between words needs to be before a new subtitle is started. Lower values cut subtitles on very short pauses. Higher values keep more words together.",
             values=["0.1", "0.2", "0.3", "0.5", "0.8", "1.0"],
@@ -964,18 +1395,29 @@ class AdvancedOptionsDialog(QDialog):
         else:
             variable.set(int(selected_value))
 
+    def sync_from_state(self):
+        """Redraw the controls from the parent's current values.
+
+        Presets write the same state this dialog edits, so an open dialog would
+        otherwise keep showing stale values.
+        """
+        parent = self._parent
+        self.beam_size_menu.setCurrentText(self.format_option_value(parent.beam_size.get()))
+        self.no_speech_menu.setCurrentText(self.format_option_value(parent.no_speech_threshold.get()))
+        self.condition_toggle.setChecked(bool(parent.condition_on_previous_text.get()))
+        self.use_gpu_toggle.setChecked(bool(parent.use_gpu.get()))
+        self.vad_filter_toggle.setChecked(bool(parent.vad_filter.get()))
+        self.pause_threshold_menu.setCurrentText(self.format_option_value(parent.pause_threshold.get()))
+
     def reset_defaults(self):
         defaults = self._parent.get_default_advanced_settings()
         self._parent.beam_size.set(defaults["beam_size"])
         self._parent.no_speech_threshold.set(defaults["no_speech_threshold"])
         self._parent.condition_on_previous_text.set(defaults["condition_on_previous_text"])
         self._parent.use_gpu.set(defaults["use_gpu"])
+        self._parent.vad_filter.set(defaults["vad_filter"])
         self._parent.pause_threshold.set(defaults["pause_threshold"])
-        self.beam_size_menu.setCurrentText(self.format_option_value(defaults["beam_size"]))
-        self.no_speech_menu.setCurrentText(self.format_option_value(defaults["no_speech_threshold"]))
-        self.condition_toggle.setChecked(defaults["condition_on_previous_text"])
-        self.use_gpu_toggle.setChecked(defaults["use_gpu"])
-        self.pause_threshold_menu.setCurrentText(self.format_option_value(defaults["pause_threshold"]))
+        self.sync_from_state()
 
 
 class CaptionPreviewWidget(QWidget):
@@ -1006,17 +1448,18 @@ class CaptionPreviewWidget(QWidget):
         self.current_time = seconds
         self.update()
 
+    def is_active(self, seg):
+        # End-exclusive: gap-filled segments are exactly back-to-back, so an
+        # inclusive end would show two captions at once on every boundary.
+        return seg["start"] <= self.current_time < seg["end"]
+
     def get_active_segments(self):
-        active = []
-        for seg in self.subtitle_segments:
-            if seg["start"] <= self.current_time <= seg["end"]:
-                active.append(seg)
-        return active
+        return [seg for seg in self.subtitle_segments if self.is_active(seg)]
 
     def mouseDoubleClickEvent(self, event):
         if self._subtitle_bg_rect and self._subtitle_bg_rect.contains(event.position().toPoint()):
             for i, seg in enumerate(self.subtitle_segments):
-                if seg["start"] <= self.current_time <= seg["end"]:
+                if self.is_active(seg):
                     self.subtitle_double_clicked.emit(i)
                     return
         super().mouseDoubleClickEvent(event)
@@ -1044,6 +1487,10 @@ class CaptionPreviewWidget(QWidget):
         painter.fillRect(canvas_x, canvas_y, canvas_w, canvas_h, QColor("#0A0A0A"))
         painter.setPen(QPen(QColor(BORDER), 1))
         painter.drawRect(canvas_x, canvas_y, canvas_w, canvas_h)
+
+        # Cleared on every early return: a stale rect would keep double-click
+        # editing armed over empty video long after the caption is gone.
+        self._subtitle_bg_rect = None
 
         if not self.subtitle_segments:
             painter.setPen(QColor(MUTED_TEXT))
@@ -1108,13 +1555,12 @@ class WhisperApp(QMainWindow):
         super().__init__()
 
         set_window_icon(self)
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.resize(1100, 720)
         self.setMinimumSize(1000, 660)
 
         self.input_path = StateValue("")
-        self.model_name = StateValue("small")
-        self.model_display = StateValue("")
+        self.model_name = StateValue("large-v3-turbo")
         self.use_word_timestamps = StateValue(True)
         self.remove_punctuation = StateValue(False)
         self.text_case = StateValue("Normal")
@@ -1133,8 +1579,10 @@ class WhisperApp(QMainWindow):
         self.subtitle_scale = StateValue(100)
         self.gap_fill = StateValue(False)
         self.censor_profanity = StateValue(False)
+        self.vad_filter = StateValue(True)
+        self.vocabulary_hints = StateValue("")
 
-        self.available_models = ["tiny", "base", "small", "medium", "large-v3"]
+        self.available_models = list(MODEL_REPOS)
         self.model_display_map = {}
         self.installed_models = set()
         self.spinner_frames = ["|", "/", "-", "\\"]
@@ -1142,15 +1590,19 @@ class WhisperApp(QMainWindow):
         self.spinner_message = "Idle"
         self.advanced_dialog = None
         self.worker_threads = []
-        self.language_display_map = {
+        # Auto-detect maps to None, which is what faster-whisper expects to run
+        # its own language identification pass.
+        self.language_display_map = {AUTO_DETECT_LANGUAGE: None}
+        self.language_display_map.update({
             f"{SUPPORTED_LANGUAGE_NAMES[code]} ({code})": code for code in sorted(
                 SUPPORTED_LANGUAGE_NAMES,
                 key=lambda code: SUPPORTED_LANGUAGE_NAMES[code].lower()
             )
-        }
+        })
 
         self.is_downloading = False
         self.is_transcribing = False
+        self.is_deleting = False
         self._cancelled = False
         self._cancel_event = threading.Event()
         self._setup_file_logging()
@@ -1160,15 +1612,19 @@ class WhisperApp(QMainWindow):
         self._cached_model_compute_type = None
 
         self.subtitle_segments = StateValue([])
+        self._segment_ends = []
         self.is_preview_playing = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setInterval(50)
         self._preview_timer.timeout.connect(self.advance_preview_playback)
+        self._preview_clock_start = 0.0
+        self._preview_clock_base_ms = 0
 
         self._media_player = None
         self._audio_output = None
         self._selected_audio_device = None
         self._audio_menu = None
+        self._audio_action_group = None
         self._suppress_slider_update = False
         self._resize_dragging = False
         self._resize_start_y = 0
@@ -1180,11 +1636,64 @@ class WhisperApp(QMainWindow):
         self.log_requested.connect(self._append_log)
         self.subtitle_preview_ready.connect(self.update_preview_subtitles)
 
+        self._settings = QSettings(APP_NAME, APP_NAME)
         self._saved_audio_device_desc = ""
+        self.load_settings()
 
         self.build_menu_bar()
         self._refresh_audio_devices()
         self.build_ui()
+
+    # Persisted preferences, keyed by StateValue attribute name. Transcription
+    # inputs are intentionally excluded -- the input file should not come back.
+    PERSISTED_SETTINGS = (
+        ("model_name", str),
+        ("language_display", str),
+        ("vocabulary_hints", str),
+        ("preset", str),
+        ("text_case", str),
+        ("max_words_per_subtitle", str),
+        ("max_chars_per_line", str),
+        ("use_word_timestamps", bool),
+        ("remove_punctuation", bool),
+        ("censor_profanity", bool),
+        ("gap_fill", bool),
+        ("use_gpu", bool),
+        ("condition_on_previous_text", bool),
+        # Preset-derived, and easy to miss: leaving it out restores a preset
+        # by name while silently reverting the behaviour it stands for.
+        ("break_on_punctuation_immediate", bool),
+        ("vad_filter", bool),
+        ("beam_size", int),
+        ("subtitle_scale", int),
+        ("vad_silence_ms", int),
+        ("no_speech_threshold", float),
+        ("pause_threshold", float),
+        ("max_subtitle_duration", float),
+    )
+
+    def load_settings(self):
+        for name, value_type in self.PERSISTED_SETTINGS:
+            stored = self._settings.value(name)
+            if stored is None:
+                continue
+            try:
+                if value_type is bool:
+                    # QSettings round-trips bools as the strings "true"/"false".
+                    value = stored if isinstance(stored, bool) else str(stored).lower() == "true"
+                else:
+                    value = value_type(stored)
+            except (TypeError, ValueError):
+                continue
+            getattr(self, name).set(value)
+
+        self._saved_audio_device_desc = str(self._settings.value("audio_device", "") or "")
+
+    def save_settings(self):
+        for name, _ in self.PERSISTED_SETTINGS:
+            self._settings.setValue(name, getattr(self, name).get())
+        self._settings.setValue("audio_device", self._saved_audio_device_desc)
+        self._settings.sync()
 
     def build_menu_bar(self):
         menu_bar = QMenuBar(self)
@@ -1205,33 +1714,63 @@ class WhisperApp(QMainWindow):
         supported_formats_action.triggered.connect(self.show_supported_formats)
         credits_action = QAction("Credits", self)
         credits_action.triggered.connect(self.show_credits_info)
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about_info)
         help_menu.addAction(model_guide_action)
         help_menu.addAction(accuracy_tips_action)
         help_menu.addSeparator()
         help_menu.addAction(supported_formats_action)
         help_menu.addAction(credits_action)
+        help_menu.addAction(about_action)
+
+    def show_about_info(self):
+        log_location = self._log_file_path or "unavailable"
+        InfoDialog(
+            self,
+            "About",
+            (
+                f"{APP_NAME} v{APP_VERSION}\n"
+                "\n"
+                "Offline subtitle generation powered by Whisper.\n"
+                "Audio never leaves your machine.\n"
+                "\n"
+                f"Models folder:\n{MODEL_DIR}\n"
+                "\n"
+                f"Log file:\n{log_location}"
+            )
+        ).exec()
 
     def show_model_guide(self):
         InfoDialog(
             self,
             "Model Guide",
             (
-                "tiny / base\n"
+                "large-v3-turbo (Recommended)  (~1.6 GB)\n"
+                "  The best balance by a wide margin. Roughly the speed of\n"
+                "  medium, close to large-v3 for accuracy.\n"
+                "  Published by deepdml rather than Systran.\n"
+                "\n"
+                "small  (~484 MB)\n"
+                "  Fine for clean, close-mic speech. On noisy audio —\n"
+                "  gameplay, music in the background, more than one person —\n"
+                "  it drops a lot of words. Measured against hand-made\n"
+                "  captions on a gameplay clip, small got about half the\n"
+                "  words wrong where turbo got around one in eight.\n"
+                "  Pick it only if turbo is too slow on your machine, and\n"
+                "  turn the Voice Activity Filter off if words go missing.\n"
+                "\n"
+                "tiny / base  (~75-145 MB)\n"
                 "  Fast, but misses a lot of words.\n"
                 "  Not great for most content.\n"
                 "\n"
-                "small (Recommended)\n"
-                "  Fast, accurate, and subtitles line up well.\n"
-                "  Best choice for most people.\n"
+                "medium  (~1.5 GB)\n"
+                "  Bigger and slower than turbo without being more accurate.\n"
+                "  Turbo is the better pick at this size.\n"
                 "\n"
-                "medium\n"
-                "  Slightly better at understanding difficult speech,\n"
-                "  but takes longer to process.\n"
-                "\n"
-                "large-v3\n"
-                "  The most accurate at understanding what was said,\n"
-                "  but subtitle timing is often off — words can appear\n"
-                "  too early or too late. Not ideal for most use cases."
+                "large-v3  (~3.1 GB)\n"
+                "  Marginally better than turbo at understanding speech,\n"
+                "  but far slower and subtitle timing is often off —\n"
+                "  words can appear too early or too late."
             )
         ).exec()
 
@@ -1242,11 +1781,23 @@ class WhisperApp(QMainWindow):
             (
                 "Common issues and what to try:\n"
                 "\n"
-                "- Missing words or quiet speech:\n"
-                "  Lower No Speech Threshold to 0.6 (keeps more audio)\n"
+                "- Whole lines missing, especially in noisy or game audio:\n"
+                "  1. Use large-v3-turbo. This is by far the biggest factor --\n"
+                "     smaller models drop a lot of speech once the Voice\n"
+                "     Activity Filter has cut the audio into pieces.\n"
+                "  2. If you must use small, turn the Voice Activity Filter\n"
+                "     off. That recovers most of it, at the cost of the odd\n"
+                "     caption over music.\n"
+                "  Raising No Speech Threshold does not help here.\n"
                 "\n"
-                "- Jumbled or hallucinated words:\n"
-                "  Raise No Speech Threshold to 1.0 (stricter filtering)\n"
+                "- Names, jargon, or game terms coming out wrong:\n"
+                "  Type them into the Vocabulary box on the Generate tab.\n"
+                "  List the actual words, comma separated -- a vague\n"
+                "  description of the video does nothing.\n"
+                "\n"
+                "- Junk captions during silence or background noise:\n"
+                "  Keep the Voice Activity Filter on -- it is what suppresses\n"
+                "  captions over music and sound effects.\n"
                 "\n"
                 "- Repetitive or stuck phrases:\n"
                 "  Turn Context Off if it's on\n"
@@ -1254,10 +1805,14 @@ class WhisperApp(QMainWindow):
                 "- Heavy accents or noisy audio:\n"
                 "  Raise Beam Size to 8-10\n"
                 "\n"
+                "- Wrong language or gibberish output:\n"
+                "  Check the Language dropdown, or set it to Auto-detect\n"
+                "\n"
                 "Tradeoffs:\n"
                 "- small is the recommended model — fast and accurate for most content.\n"
+                "- large-v3-turbo is the most accurate, at roughly the speed of medium.\n"
                 "- Higher Beam Size is significantly slower on CPU.\n"
-                "- Lower No Speech Threshold keeps more speech but may add junk.\n"
+                "- Higher No Speech Threshold keeps more speech but may add junk.\n"
                 "- Context helps continuity but can carry mistakes forward."
             )
         ).exec()
@@ -1290,6 +1845,11 @@ class WhisperApp(QMainWindow):
                 "- NumPy\n"
                 "- tokenizers\n"
                 "- tqdm\n"
+                "\n"
+                "Speech models:\n"
+                "- tiny, base, small, medium, large-v3 by Systran\n"
+                "- large-v3-turbo by deepdml\n"
+                "All are CTranslate2 conversions of OpenAI's Whisper.\n"
                 "\n"
                 "For redistribution, include THIRD_PARTY_NOTICES.md with the app."
             )
@@ -1339,6 +1899,21 @@ class WhisperApp(QMainWindow):
         self.input_entry.textChanged.connect(self.input_path.set)
         self.input_entry.file_dropped.connect(self.handle_file_drop)
         file_layout.addWidget(self.input_entry, 0, 1)
+
+        self.vocabulary_label = QLabel("Vocabulary")
+        file_layout.addWidget(self.vocabulary_label, 1, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.vocabulary_entry = QLineEdit(self.vocabulary_hints.get())
+        self.vocabulary_entry.setPlaceholderText(
+            "Optional: names, jargon, or game terms in this video — improves accuracy"
+        )
+        self.vocabulary_entry.setToolTip(
+            "Words Whisper is unlikely to know: player names, game terms, brand names.\n"
+            "Measured on real gameplay audio, listing the right terms cut the error\n"
+            "rate from 15% to 13%. A vague description does not help — use actual words."
+        )
+        self.vocabulary_entry.textChanged.connect(self.vocabulary_hints.set)
+        file_layout.addWidget(self.vocabulary_entry, 1, 1)
+
         file_layout.setColumnStretch(1, 1)
         root.addWidget(file_frame)
 
@@ -1359,12 +1934,14 @@ class WhisperApp(QMainWindow):
         language_label.setObjectName("bold")
         preset_layout.addWidget(language_label)
         language_values = list(self.language_display_map.keys())
-        english_display = next(display for display, code in self.language_display_map.items() if code == "en")
-        current_language = self.language_display.get() or english_display
+        current_language = self.language_display.get() or AUTO_DETECT_LANGUAGE
         self.language_menu = QComboBox()
         self.language_menu.addItems(language_values)
         self.language_menu.currentTextChanged.connect(self.language_display.set)
         self.language_menu.setCurrentText(current_language)
+        # setCurrentText emits nothing when the combo already shows that value,
+        # which is the case for the default, so seed the state directly.
+        self.language_display.set(self.language_menu.currentText())
         preset_layout.addWidget(self.language_menu, 1)
         root.addWidget(preset_frame)
 
@@ -1413,7 +1990,7 @@ class WhisperApp(QMainWindow):
         self.word_timestamps_checkbox.setChecked(self.use_word_timestamps.get())
         self.word_timestamps_checkbox.toggled.connect(self.use_word_timestamps.set)
         timing_layout.addWidget(self.word_timestamps_checkbox, 2, 0, 1, 2)
-        self.max_words_label = QLabel("Max words/line")
+        self.max_words_label = QLabel("Max words/subtitle")
         timing_layout.addWidget(self.max_words_label, 3, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.max_words_entry = QLineEdit(self.max_words_per_subtitle.get())
         self.max_words_entry.textChanged.connect(self.max_words_per_subtitle.set)
@@ -1484,7 +2061,7 @@ class WhisperApp(QMainWindow):
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setPlaceholderText("Subtitles will appear here after generation...")
+        self.log_box.setPlaceholderText("Progress and messages will appear here...")
         self.log_box.setFont(QFont("Segoe UI", 11))
         self.log_box.setStyleSheet("QTextEdit { color: #D8D8D8; font-size: 11px; }")
         root.addWidget(self.log_box, 1)
@@ -1524,73 +2101,127 @@ class WhisperApp(QMainWindow):
         self.worker_threads.append((thread, worker))
         thread.start()
 
+    PRESETS = {
+        "Normal": {
+            "pause_threshold": 0.5,
+            "max_subtitle_duration": 3.2,
+            "vad_silence_ms": 700,
+            "break_on_punctuation_immediate": False,
+            "max_words_per_subtitle": "8",
+            "max_chars_per_line": "42",
+            "gap_fill": False,
+            "description": "balanced subtitle pacing.",
+        },
+        "TikTok": {
+            "pause_threshold": 0.5,
+            "max_subtitle_duration": 2.0,
+            "vad_silence_ms": 500,
+            "break_on_punctuation_immediate": True,
+            "max_words_per_subtitle": "2",
+            "max_chars_per_line": "20",
+            "gap_fill": True,
+            "description": "1-2 words per subtitle, gap-filled for continuous display.",
+        },
+    }
+
     def on_preset_changed(self, choice):
+        preset = self.PRESETS.get(choice)
+        if preset is None:
+            return
+
+        # Pause threshold is also editable in Advanced Options, so say plainly
+        # when a preset is about to overwrite a hand-tuned value.
+        if self.pause_threshold.get() != preset["pause_threshold"]:
+            self.log(
+                f"Preset overrides Pause Threshold: "
+                f"{self.pause_threshold.get()} -> {preset['pause_threshold']}"
+            )
+
         self.preset.set(choice)
-        if choice == "Normal":
-            self.pause_threshold.set(0.5)
-            self.max_subtitle_duration.set(3.2)
-            self.vad_silence_ms.set(700)
-            self.break_on_punctuation_immediate.set(False)
-            self.max_words_per_subtitle.set("8")
-            self.max_chars_per_line.set("42")
-            self.gap_fill.set(False)
-            self.max_words_entry.setText("8")
-            self.max_chars_entry.setText("42")
-            self.gap_fill_checkbox.setChecked(False)
-            self.log("Preset: Normal - balanced subtitle pacing.")
-        elif choice == "TikTok":
-            self.pause_threshold.set(0.5)
-            self.max_subtitle_duration.set(2.0)
-            self.vad_silence_ms.set(500)
-            self.break_on_punctuation_immediate.set(True)
-            self.max_words_per_subtitle.set("2")
-            self.max_chars_per_line.set("20")
-            self.gap_fill.set(True)
-            self.max_words_entry.setText("2")
-            self.max_chars_entry.setText("20")
-            self.gap_fill_checkbox.setChecked(True)
-            self.log("Preset: TikTok - 1-2 words per subtitle, gap-filled for continuous display.")
+        self.pause_threshold.set(preset["pause_threshold"])
+        self.max_subtitle_duration.set(preset["max_subtitle_duration"])
+        self.vad_silence_ms.set(preset["vad_silence_ms"])
+        self.break_on_punctuation_immediate.set(preset["break_on_punctuation_immediate"])
+        self.max_words_per_subtitle.set(preset["max_words_per_subtitle"])
+        self.max_chars_per_line.set(preset["max_chars_per_line"])
+        self.gap_fill.set(preset["gap_fill"])
+
+        self.max_words_entry.setText(preset["max_words_per_subtitle"])
+        self.max_chars_entry.setText(preset["max_chars_per_line"])
+        self.gap_fill_checkbox.setChecked(preset["gap_fill"])
+
+        # Keep an open Advanced Options dialog in sync with the new values.
+        if self.advanced_dialog is not None and self.advanced_dialog.isVisible():
+            self.advanced_dialog.sync_from_state()
+
+        self.log(f"Preset: {choice} - {preset['description']}")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
+            focus_widget = QApplication.focusWidget()
+            if isinstance(focus_widget, (QLineEdit, QTextEdit)):
+                super().keyPressEvent(event)
+                return
             if self.tab_widget.currentIndex() == 1 and self.tab_widget.isTabEnabled(1):
                 self.toggle_preview_playback()
                 return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        if self.is_downloading or self.is_transcribing:
-            self._cancel_event.set()
-            for thread_ref, _ in self.worker_threads:
-                if thread_ref.isRunning():
-                    thread_ref.quit()
-                    thread_ref.wait(3000)
+        # Signal any running worker to stop. Transcription checks this between
+        # segments; a download in progress cannot be interrupted, so we wait.
+        self._cancelled = True
+        self._cancel_event.set()
+        self._preview_timer.stop()
+        self.spinner_timer.stop()
         if self._media_player is not None:
             self._media_player.stop()
+
+        # Saved before the shutdown wait, so preferences survive the hard exit
+        # below when a worker refuses to stop.
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+
+        stubborn = False
+        for thread_ref, _ in self.worker_threads:
+            if thread_ref.isRunning():
+                # quit() only unwinds a Qt event loop; it cannot interrupt the
+                # blocking call inside the worker's run().
+                thread_ref.quit()
+                if not thread_ref.wait(WORKER_SHUTDOWN_TIMEOUT_MS):
+                    stubborn = True
+
+        if stubborn:
+            # A worker is still inside CTranslate2 or a download. Returning from
+            # closeEvent would tear down the interpreter underneath live native
+            # code and crash on exit, so leave by a path that skips cleanup.
+            # log() writes to disk synchronously, so the message survives.
+            self.log("Closing while work is still running; exiting now.")
+            os._exit(0)
+
         event.accept()
 
     def cancel_operation(self):
+        # Request cancellation but keep controls disabled until the worker
+        # thread actually finishes. The finish callback re-enables the UI.
+        # This prevents a second operation starting alongside the live worker.
         self._cancel_event.set()
+        self._cancelled = True
+        self.cancel_btn.setEnabled(False)
         if self.is_downloading:
-            self.log("Download cancelled.")
-            self.is_downloading = False
-            self.set_download_state(False)
-            self.cancel_btn.hide()
+            self.log("Downloads can't be interrupted; finishing in the background...")
+            self.spinner_message = "Finishing download..."
         elif self.is_transcribing:
-            self.log("Transcription cancelled.")
-            self.is_transcribing = False
-            self._cancelled = True
-            self.clear_preview_tab()
-            self.set_transcription_state(False)
-            self.cancel_btn.hide()
+            self.log("Cancelling transcription...")
+            self.spinner_message = "Cancelling..."
 
     def _setup_file_logging(self):
-        try:
-            log_dir = os.path.join(APP_DIR, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-            self._log_file_path = os.path.join(log_dir, "smartcaption.log")
-        except OSError:
-            self._log_file_path = None
+        # Same local-then-user-data fallback the model directory uses: an app
+        # installed under Program Files cannot write beside its own exe, and
+        # that is exactly when logs matter most.
+        self._log_file_path = resolve_log_file(APP_DIR)
 
     def eventFilter(self, obj, event):
         if isinstance(obj, QComboBox):
@@ -1619,7 +2250,6 @@ class WhisperApp(QMainWindow):
         return super().eventFilter(obj, event)
 
     def on_preview_subtitle_double_clicked(self, segment_idx):
-        self.tab_widget.setCurrentIndex(1)
         item = self._timeline_table.item(segment_idx, 3)
         if item:
             self._timeline_table.scrollToItem(item, QTableWidget.ScrollHint.PositionAtCenter)
@@ -1638,6 +2268,7 @@ class WhisperApp(QMainWindow):
             self.input_entry,
             self.preset_menu,
             self.download_btn,
+            self.delete_btn,
             self.generate_btn,
             self.model_menu,
             self.word_timestamps_checkbox,
@@ -1648,19 +2279,34 @@ class WhisperApp(QMainWindow):
             self.max_chars_entry,
             self.gap_fill_checkbox,
             self.censor_profanity_checkbox,
+            self.vocabulary_entry,
         ):
             widget.setDisabled(disabled)
         self.menuBar().setDisabled(disabled)
         if self.advanced_dialog is not None and self.advanced_dialog.isVisible():
             self.advanced_dialog.setDisabled(disabled)
+        if not disabled:
+            # Restore download/delete enablement based on install state.
+            self._update_model_action_buttons(self.model_name.get())
 
     def set_download_state(self, active, model_name=None):
         if active:
             self._cancel_event.clear()
+            self.cancel_btn.setEnabled(True)
             self.cancel_btn.show()
             self.start_status_spinner(f"Downloading {model_name}...")
         else:
             self.cancel_btn.hide()
+            self.stop_status_spinner()
+
+        self.set_busy_controls_disabled(bool(active))
+
+    def set_delete_state(self, active, model_name=None):
+        # No cancel button: interrupting a half-finished rmtree would leave a
+        # model directory that looks installed but cannot load.
+        if active:
+            self.start_status_spinner(f"Deleting {model_name}...")
+        else:
             self.stop_status_spinner()
 
         self.set_busy_controls_disabled(bool(active))
@@ -1677,7 +2323,7 @@ class WhisperApp(QMainWindow):
         self.download_status_label.setText("Idle")
 
     def schedule_spinner(self):
-        if not self.is_downloading and not self.is_transcribing:
+        if not self.is_downloading and not self.is_transcribing and not self.is_deleting:
             self.spinner_timer.stop()
             return
 
@@ -1686,6 +2332,7 @@ class WhisperApp(QMainWindow):
 
     def clear_preview_tab(self):
         self.subtitle_segments.set([])
+        self._segment_ends = []
         self._preview_widget.set_subtitles([])
         self._preview_widget.update()
         self._preview_play_btn.setText("▶ Play")
@@ -1706,6 +2353,7 @@ class WhisperApp(QMainWindow):
         self.is_transcribing = active
         if active:
             self._cancel_event.clear()
+            self.cancel_btn.setEnabled(True)
             self.cancel_btn.show()
             self.tab_widget.setTabEnabled(1, False)
             self.clear_preview_tab()
@@ -1907,8 +2555,15 @@ class WhisperApp(QMainWindow):
 
         outer.addWidget(footer)
 
+        # The slider was populated from the saved value before its valueChanged
+        # signal was connected, so nothing has pushed that value into the widget
+        # that actually paints. Run the handler once now that all three of the
+        # slider, the label, and the preview widget exist.
+        self.on_scale_changed(self.subtitle_scale.get())
+
     def update_preview_subtitles(self, segments):
         self.subtitle_segments.set(segments)
+        self._segment_ends = [seg.get("end", 0) for seg in segments]
         self._preview_widget.set_subtitles(segments)
         total = segments[-1]["end"] if segments else 0.0
         total_ms = int(total * 1000)
@@ -2000,13 +2655,21 @@ class WhisperApp(QMainWindow):
             return
 
         selected = default_device
+        # An action group makes selection exclusive in Qt rather than by hand.
+        self._audio_action_group = QActionGroup(self._audio_menu)
+        self._audio_action_group.setExclusive(True)
         for device in audio_devices:
             action = self._audio_menu.addAction(device.description())
             action.setCheckable(True)
+            self._audio_action_group.addAction(action)
             if self._saved_audio_device_desc and device.description() == self._saved_audio_device_desc:
                 action.setChecked(True)
                 selected = device
-            action.triggered.connect(lambda checked, d=device: self._on_audio_menu_selected(d))
+            # The action is captured explicitly: these are connected to a bare
+            # lambda, so self.sender() would not resolve back to this window.
+            action.triggered.connect(
+                lambda checked, d=device, a=action: self._on_audio_menu_selected(d, a)
+            )
 
         if not self._saved_audio_device_desc:
             for action in self._audio_menu.actions():
@@ -2017,12 +2680,8 @@ class WhisperApp(QMainWindow):
         self._selected_audio_device = selected
         self._audio_menu.setEnabled(True)
 
-    def _on_audio_menu_selected(self, device):
-        for action in self._audio_menu.actions():
-            action.setChecked(False)
-        sender = self.sender()
-        if sender:
-            sender.setChecked(True)
+    def _on_audio_menu_selected(self, device, action):
+        action.setChecked(True)
         self._selected_audio_device = device
         self._saved_audio_device_desc = device.description()
         if self._media_player and self._media_player.source().isValid():
@@ -2106,6 +2765,9 @@ class WhisperApp(QMainWindow):
             total_ms = self._preview_slider.maximum()
             if current_ms >= total_ms:
                 self._preview_slider.setValue(0)
+                current_ms = 0
+            self._preview_clock_base_ms = current_ms
+            self._preview_clock_start = time.monotonic()
             self.is_preview_playing = True
             self._preview_timer.start()
             self._preview_play_btn.setText("⏸ Pause")
@@ -2113,13 +2775,12 @@ class WhisperApp(QMainWindow):
     def scroll_timeline_to_time(self, seconds):
         if not self._sync_checkbox.isChecked():
             return
-        segments = self.subtitle_segments.get()
-        if not segments:
+        ends = self._segment_ends
+        if not ends:
             return
-        ends = [seg.get("end", 0) for seg in segments]
         i = bisect.bisect_right(ends, seconds)
-        if i >= len(segments):
-            i = len(segments) - 1
+        if i >= len(ends):
+            i = len(ends) - 1
         item = self._timeline_table.item(i, 0)
         if item:
             self._timeline_table.scrollToItem(item, QTableWidget.ScrollHint.PositionAtCenter)
@@ -2128,17 +2789,25 @@ class WhisperApp(QMainWindow):
             self._timeline_table.blockSignals(False)
 
     def advance_preview_playback(self):
-        current_ms = self._preview_slider.value()
+        """Silent playback clock, used when the media file cannot be loaded.
+
+        Reachable when the source was moved or deleted between transcription and
+        preview, so captions can still be scrubbed without audio. Driven by the
+        wall clock rather than by counting ticks, which would drift.
+        """
+        now = time.monotonic()
+        elapsed_ms = int((now - self._preview_clock_start) * 1000)
+        new_ms = self._preview_clock_base_ms + elapsed_ms
+
         total_ms = self._preview_slider.maximum()
-        new_ms = current_ms + 50
         if new_ms >= total_ms:
             new_ms = total_ms
             self.is_preview_playing = False
             self._preview_timer.stop()
             self._preview_play_btn.setText("▶ Play")
+
         self._preview_slider.setValue(new_ms)
-        seconds = new_ms / 1000.0
-        self.scroll_timeline_to_time(seconds)
+        self.scroll_timeline_to_time(new_ms / 1000.0)
 
     def populate_timeline(self, segments):
         self._timeline_table.blockSignals(True)
@@ -2158,7 +2827,11 @@ class WhisperApp(QMainWindow):
             end_item.setFlags(end_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._timeline_table.setItem(row, 2, end_item)
 
+            # Line breaks are shown as " | " but the real text is carried in
+            # UserRole; parsing the display string back would corrupt any
+            # caption that legitimately contains a pipe.
             text_item = QTableWidgetItem(seg["text"].replace("\n", " | "))
+            text_item.setData(Qt.ItemDataRole.UserRole, seg["text"])
             self._timeline_table.setItem(row, 3, text_item)
         self._timeline_table.blockSignals(False)
 
@@ -2175,21 +2848,35 @@ class WhisperApp(QMainWindow):
         item = self._timeline_table.item(row, col)
         if item is None:
             return
-        new_text = item.text().replace(" | ", "\n")
+
+        # Re-wrap the edit so it still obeys the line-width limit. Case and
+        # censoring rules are deliberately not re-applied, and the two-line cap
+        # is not enforced here either -- the user's typed text is taken as final,
+        # and trimming it to fit would delete words they just typed. The cap
+        # still governs everything the generator produces.
+        try:
+            max_chars = int(self.max_chars_per_line.get().strip())
+        except (ValueError, AttributeError):
+            max_chars = 42
+        max_chars = max(1, max_chars)
+
+        edited = item.text().replace(" | ", " ")
+        new_text = "\n".join(wrap_text_to_lines(edited, max_chars))
+
         segments[row]["text"] = new_text
         self.subtitle_segments.set(segments)
+
+        # Write the canonical text back without re-entering this handler.
+        self._timeline_table.blockSignals(True)
+        item.setData(Qt.ItemDataRole.UserRole, new_text)
+        item.setText(new_text.replace("\n", " | "))
+        self._timeline_table.blockSignals(False)
+
         self._preview_widget.set_subtitles(segments)
         self._preview_widget.update()
 
     def format_srt_time(self, seconds):
-        ms = int(seconds * 1000)
-        h = ms // 3600000
-        ms %= 3600000
-        m = ms // 60000
-        ms %= 60000
-        s = ms // 1000
-        ms %= 1000
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+        return format_srt_timestamp(seconds)
 
     def export_srt_from_preview(self):
         segments = self.subtitle_segments.get()
@@ -2210,6 +2897,10 @@ class WhisperApp(QMainWindow):
         if not output_file:
             return
 
+        # Not every platform's save dialog appends the filter's extension.
+        if not output_file.lower().endswith(".srt"):
+            output_file += ".srt"
+
         self.write_srt_file(output_file, segments)
         self.log(f"Exported {len(segments)} subtitles to {output_file}")
 
@@ -2225,6 +2916,7 @@ class WhisperApp(QMainWindow):
             "no_speech_threshold": 0.8,
             "condition_on_previous_text": False,
             "use_gpu": False,
+            "vad_filter": True,
             "pause_threshold": 0.5,
         }
 
@@ -2242,7 +2934,7 @@ class WhisperApp(QMainWindow):
         self.advanced_dialog = None
 
     def get_repo_id(self, model_name):
-        return f"{MODEL_REPO_PREFIX}{model_name}"
+        return MODEL_REPOS[model_name]
 
     def get_model_dir(self, model_name):
         return os.path.join(MODEL_DIR, model_name)
@@ -2292,7 +2984,7 @@ class WhisperApp(QMainWindow):
     def get_model_display_name(self, model_name):
         marker = "✓" if model_name in self.installed_models else "✗"
         name = f"{model_name}"
-        if model_name == "small":
+        if model_name == "large-v3-turbo":
             name += " (Recommended)"
         return f"{marker} {name}"
 
@@ -2312,31 +3004,32 @@ class WhisperApp(QMainWindow):
         self.model_menu.setCurrentText(selected_display)
         self.model_menu.blockSignals(False)
 
-        self.model_display.set(selected_display)
         self.model_name.set(self.model_display_map[selected_display])
         self._update_model_action_buttons(self.model_display_map[selected_display])
 
     def on_model_selected(self, selected_display):
         model_name = self.model_display_map.get(selected_display)
         if model_name:
-            self.model_display.set(selected_display)
             self.model_name.set(model_name)
             self._update_model_action_buttons(model_name)
 
     def _update_model_action_buttons(self, model_name):
         installed = self.model_exists(model_name)
-        can_download = not installed and not self.is_downloading
+        busy = self.is_downloading or self.is_transcribing or self.is_deleting
+        can_download = not installed and not busy
         self.download_btn.setEnabled(can_download)
         if installed:
             self.download_btn.setToolTip("Model already downloaded")
-        elif self.is_downloading:
-            self.download_btn.setToolTip("A download is already in progress")
+        elif busy:
+            self.download_btn.setToolTip("Please wait for the current operation to finish")
         else:
             self.download_btn.setToolTip("Download the selected model")
-        self.delete_btn.setEnabled(installed and not self.is_downloading)
+        self.delete_btn.setEnabled(installed and not busy)
 
     def _validate_numeric_inputs(self):
-        invalid_style = "border: 1px solid #CC5555;"
+        invalid_style = (
+            "QLineEdit, QLineEdit:hover, QLineEdit:focus { border: 1px solid #CC5555; }"
+        )
         try:
             val = int(self.max_words_per_subtitle.get().strip())
             if val < 1:
@@ -2352,7 +3045,16 @@ class WhisperApp(QMainWindow):
         except (ValueError, AttributeError):
             self.max_chars_entry.setStyleSheet(invalid_style)
 
+    def _is_supported_media(self, path):
+        return bool(path) and path.lower().endswith(SUPPORTED_MEDIA_EXTENSIONS)
+
     def set_input_file(self, path):
+        if not self._is_supported_media(path):
+            self.log(
+                f"Unsupported file type: {os.path.basename(path)}. "
+                "Pick a supported audio or video file."
+            )
+            return
         self.input_path.set(path)
         self.input_entry.setText(path)
         self.log(f"Selected input file: {os.path.basename(path)}")
@@ -2375,14 +3077,13 @@ class WhisperApp(QMainWindow):
 
     # REAL DETECTION (load test)
     def model_exists(self, model_name):
-        if not self.installed_models:
-            self.detect_installed_models()
+        self.detect_installed_models()
         return model_name in self.installed_models
 
     # DOWNLOAD
     def download_model(self):
-        if self.is_downloading:
-            self.log("Download already in progress ⏳")
+        if self.is_downloading or self.is_transcribing or self.is_deleting:
+            self.log("Please wait for the current operation to finish.")
             return
 
         model_name = self.model_name.get()
@@ -2391,10 +3092,20 @@ class WhisperApp(QMainWindow):
             self.log(f"{model_name} already installed ✅")
             return
 
+        required_mb = MODEL_SIZES_MB.get(model_name, 0)
+        free_mb = get_free_space_mb(MODEL_DIR)
+        if free_mb is not None and required_mb and free_mb < required_mb * 1.15:
+            self.log(
+                f"Not enough free disk space for {model_name}: needs about "
+                f"{required_mb} MB, {int(free_mb)} MB available."
+            )
+            return
+
+        self._cancelled = False
         self.is_downloading = True
         self.set_download_state(True, model_name)
 
-        self.log(f"Downloading {model_name}...")
+        self.log(f"Downloading {model_name} (about {required_mb} MB) from {self.get_repo_id(model_name)}...")
         self.run_in_worker(lambda: self._download_worker(model_name), self.finish_download)
 
     def _download_worker(self, model_name):
@@ -2404,7 +3115,7 @@ class WhisperApp(QMainWindow):
                 repo_id=self.get_repo_id(model_name),
                 local_dir=model_dir,
                 max_workers=1,
-                tqdm_class=None,
+                tqdm_class=make_progress_reporter(self._on_download_progress),
             )
 
             self.log(f"{model_name} installed ✅")
@@ -2413,47 +3124,134 @@ class WhisperApp(QMainWindow):
         except Exception as err:
             self.log(f"Error: {err}")
 
+    def _on_download_progress(self, downloaded_bytes, total_bytes):
+        # Called from the download thread; only touches a plain string that the
+        # spinner timer picks up on the UI thread.
+        if total_bytes:
+            # hf_hub's aggregate bar starts at total=0 and grows as it fetches
+            # metadata, so downloaded can briefly exceed the known total.
+            downloaded_bytes = min(downloaded_bytes, total_bytes)
+            percent = downloaded_bytes * 100 // total_bytes
+            self.spinner_message = (
+                f"Downloading {self.model_name.get()}... "
+                f"{percent}% ({format_bytes(downloaded_bytes)} / {format_bytes(total_bytes)})"
+            )
+        else:
+            self.spinner_message = (
+                f"Downloading {self.model_name.get()}... {format_bytes(downloaded_bytes)}"
+            )
+
     def finish_download(self):
-        self.refresh_model_menu()
         self.is_downloading = False
+        self.refresh_model_menu()
         self.set_download_state(False)
 
     # SAFE DELETE
     def force_delete(self, path):
-        def onerror(func, path, exc_info):
+        def handler(func, target, _exc):
             try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
+                os.chmod(target, stat.S_IWRITE)
+                func(target)
             except Exception:
                 pass
 
-        shutil.rmtree(path, onerror=onerror)
+        # shutil deprecated `onerror` in favour of `onexc` in Python 3.12.
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=handler)
+        else:
+            shutil.rmtree(path, onerror=handler)
 
     def delete_model(self):
-        if self.is_downloading:
-            self.log("Cannot delete while downloading ❌")
+        if self.is_downloading or self.is_transcribing or self.is_deleting:
+            self.log("Cannot delete while a model is in use ❌")
             return
 
         model_name = self.model_name.get()
         model_dir = self.get_model_dir(model_name)
         repo_cache_path = self.get_model_cache_path(model_name)
-        deleted = False
 
-        if os.path.isdir(model_dir):
-            self.force_delete(model_dir)
-            deleted = True
-
-        if os.path.isdir(repo_cache_path):
-            self.force_delete(repo_cache_path)
-            deleted = True
-
-        if deleted:
-            self.refresh_model_menu()
-            self.log(f"{model_name} deleted ❌")
-        else:
+        if not os.path.isdir(model_dir) and not os.path.isdir(repo_cache_path):
             self.log("Model not found")
+            return
+
+        size_mb = MODEL_SIZES_MB.get(model_name)
+        size_note = f" (about {size_mb} MB)" if size_mb else ""
+        confirmed = QMessageBox.question(
+            self,
+            "Delete Model",
+            f"Delete {model_name}{size_note}?\n\n"
+            "It will have to be downloaded again before you can use it.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        # Release the in-memory model first. On Windows CTranslate2 keeps
+        # model.bin memory-mapped, which blocks deletion while it's loaded.
+        if self._cached_model is not None and self._cached_model_name == model_name:
+            self._cached_model = None
+            self._cached_model_name = None
+            self._cached_model_device = None
+            self._cached_model_compute_type = None
+            gc.collect()
+
+        # Off the UI thread: removing large-v3 is several gigabytes of rmtree,
+        # long enough for Windows to paint the window as "Not Responding".
+        self.is_deleting = True
+        self.set_delete_state(True, model_name)
+        self.run_in_worker(
+            lambda: self._delete_worker(model_name, model_dir, repo_cache_path),
+            self.finish_delete,
+        )
+
+    def _delete_worker(self, model_name, model_dir, repo_cache_path):
+        for path in (model_dir, repo_cache_path):
+            if os.path.isdir(path):
+                self.force_delete(path)
+
+        # force_delete swallows per-file errors, so confirm rather than assume.
+        if os.path.isdir(model_dir) or os.path.isdir(repo_cache_path):
+            self.log(f"Could not fully delete {model_name}; some files are in use.")
+        else:
+            self.log(f"{model_name} deleted ❌")
+
+        self._purge_download_cache_if_unused()
+
+    def finish_delete(self):
+        self.is_deleting = False
+        self.refresh_model_menu()
+        self.set_delete_state(False)
+
+    def _purge_download_cache_if_unused(self):
+        """Reclaim the Hugging Face Xet chunk cache once no models are left.
+
+        Xet keeps deduplicated chunks that repos share, so this can only go when
+        nothing remains that might still be relying on them. Left alone it
+        survives every delete, so the app frees less space than it just said it
+        would. Runs on the delete worker: the cache has its own multi-gigabyte
+        ceiling, and clearing it is exactly as slow as the delete it follows.
+        """
+        if MODEL_DIR is None:
+            return
+        # Read the disk rather than self.installed_models: that is refreshed on
+        # the UI thread after this worker finishes, so it is still stale here.
+        if any(self.get_model_load_path(name) for name in self.available_models):
+            return
+
+        xet_cache = os.path.join(MODEL_DIR, "xet")
+        if not os.path.isdir(xet_cache):
+            return
+        try:
+            self.force_delete(xet_cache)
+        except OSError:
+            pass
 
     def start_transcription(self):
+        if self.is_transcribing or self.is_downloading or self.is_deleting:
+            self.log("Please wait for the current operation to finish.")
+            return
+
         input_path = self.input_path.get().strip()
         model_name = self.model_name.get()
         subtitle_settings = self.get_subtitle_settings()
@@ -2491,10 +3289,11 @@ class WhisperApp(QMainWindow):
             f"Options: word timing={'on' if subtitle_settings['use_word_timestamps'] else 'off'}, "
             f"max words={subtitle_settings['max_words']}, max chars={subtitle_settings['max_chars']}, "
             f"punctuation={'off' if subtitle_settings['remove_punctuation'] else 'on'}, "
-            f"language={subtitle_settings['language_code']}, "
+            f"language={subtitle_settings['language_code'] or 'auto'}, "
             f"case={subtitle_settings['text_case']}, beam={subtitle_settings['beam_size']}, "
             f"no-speech={subtitle_settings['no_speech_threshold']:.1f}, "
-            f"context={'on' if subtitle_settings['condition_on_previous_text'] else 'off'}"
+            f"context={'on' if subtitle_settings['condition_on_previous_text'] else 'off'}, "
+            f"vad={'on' if subtitle_settings['vad_filter'] else 'off'}"
         )
         self.run_in_worker(lambda: self.run_whisper(subtitle_settings), lambda: self.finish_transcription(subtitle_settings))
 
@@ -2555,23 +3354,45 @@ class WhisperApp(QMainWindow):
             use_word_timestamps = subtitle_settings["use_word_timestamps"]
 
             def _get_segments(m):
-                gen, _ = m.transcribe(
+                gen, info = m.transcribe(
                     subtitle_settings["input_path"],
                     language=subtitle_settings["language_code"],
                     beam_size=subtitle_settings["beam_size"],
-                    temperature=0.0,
-                    compression_ratio_threshold=1.8,
-                    log_prob_threshold=-0.5,
+                    # Temperature fallback is Whisper's main defence against
+                    # repetition loops: a window that trips the sanity checks
+                    # below gets re-decoded at a higher temperature. Passing a
+                    # single temperature disables the retry entirely, which
+                    # makes the two thresholds below inert.
+                    temperature=TEMPERATURE_FALLBACK,
+                    compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
+                    log_prob_threshold=LOG_PROB_THRESHOLD,
                     no_speech_threshold=subtitle_settings["no_speech_threshold"],
                     condition_on_previous_text=subtitle_settings["condition_on_previous_text"],
                     word_timestamps=use_word_timestamps,
-                    vad_filter=True,
+                    # Only honoured when word timestamps are on.
+                    hallucination_silence_threshold=(
+                        HALLUCINATION_SILENCE_THRESHOLD if use_word_timestamps else None
+                    ),
+                    # Primes the decoder with words it would not otherwise
+                    # predict. Benchmarking against hand-made captions showed
+                    # it moving results by only a word or two either way on a
+                    # 126-word clip, so it is offered as an opt-in tool rather
+                    # than promised as a win. A generic description of the
+                    # video measurably does not help; actual terms may.
+                    initial_prompt=subtitle_settings.get("initial_prompt"),
+                    vad_filter=subtitle_settings["vad_filter"],
                     vad_parameters={
                         "min_silence_duration_ms": subtitle_settings["vad_silence_ms"],
                         "min_speech_duration_ms": 100,
                         "speech_pad_ms": 400,
                     },
                 )
+                if subtitle_settings["language_code"] is None:
+                    language_name = SUPPORTED_LANGUAGE_NAMES.get(info.language, info.language)
+                    self.log(
+                        f"Detected language: {language_name} "
+                        f"({info.language}, {info.language_probability:.0%} confidence)"
+                    )
                 return gen
 
             def _run(m):
@@ -2580,8 +3401,11 @@ class WhisperApp(QMainWindow):
             if self._cached_model_device == "cuda":
                 try:
                     subtitle_segments = _run(model)
-                except Exception:
-                    self.log("GPU runtime not found, using CPU instead.")
+                except Exception as err:
+                    # This guard covers transcription *and* subtitle building,
+                    # so the cause is not necessarily CUDA. Report what actually
+                    # failed rather than blaming the GPU runtime every time.
+                    self.log(f"GPU transcription failed ({err}); retrying on CPU.")
                     self._cached_model = WhisperModel(
                         model_path,
                         compute_type="int8",
@@ -2601,9 +3425,11 @@ class WhisperApp(QMainWindow):
             if self._cancel_event.is_set():
                 self.log("Transcription cancelled during subtitle building.")
                 return
-            subtitle_segments = self.normalize_subtitle_timings(subtitle_segments)
+            subtitle_segments, gap_warnings = normalize_subtitle_timings(subtitle_segments)
+            for subtitle_number in gap_warnings:
+                self.log(f"Large silent gap detected before subtitle {subtitle_number}.")
             if subtitle_settings.get("gap_fill"):
-                subtitle_segments = self.apply_gap_fill(subtitle_segments)
+                subtitle_segments = apply_gap_fill(subtitle_segments)
             self.subtitle_preview_ready.emit(subtitle_segments)
             self.log(f"Created {len(subtitle_segments)} subtitle segments.")
             self.log("Edit subtitles in the Output tab, then click Export to save.")
@@ -2629,7 +3455,7 @@ class WhisperApp(QMainWindow):
 
         beam_size = self.beam_size.get()
         no_speech_threshold = round(float(self.no_speech_threshold.get()), 1)
-        language_code = self.language_display_map.get(self.language_display.get())
+        language_display = self.language_display.get()
 
         if beam_size <= 0:
             self.log("Beam size must be greater than 0.")
@@ -2639,9 +3465,13 @@ class WhisperApp(QMainWindow):
             self.log("No speech threshold must be between 0.0 and 1.0.")
             return None
 
-        if not language_code:
+        # Auto-detect is a valid choice and maps to None, so check membership
+        # rather than truthiness.
+        if language_display not in self.language_display_map:
             self.log("Pick a valid language.")
             return None
+
+        language_code = self.language_display_map[language_display]
 
         return {
             "use_word_timestamps": self.use_word_timestamps.get(),
@@ -2654,35 +3484,27 @@ class WhisperApp(QMainWindow):
             "no_speech_threshold": no_speech_threshold,
             "condition_on_previous_text": self.condition_on_previous_text.get(),
             "use_gpu": self.use_gpu.get(),
+            "vad_filter": self.vad_filter.get(),
+            "initial_prompt": self.vocabulary_hints.get().strip() or None,
             "gap_fill": self.gap_fill.get(),
             "censor_profanity": self.censor_profanity.get(),
         }
-
-    def apply_gap_fill(self, subtitle_segments):
-        if len(subtitle_segments) < 2:
-            return subtitle_segments
-        result = []
-        for i, seg in enumerate(subtitle_segments):
-            if i < len(subtitle_segments) - 1:
-                result.append({
-                    "start": seg["start"],
-                    "end": subtitle_segments[i + 1]["start"],
-                    "text": seg["text"],
-                })
-            else:
-                result.append(seg)
-        return result
 
     def write_srt_file(self, output_file, subtitle_segments):
         self.log(f"Writing subtitles to {output_file}...")
         try:
             with open(output_file, "w", encoding="utf-8") as f:
-                for i, seg in enumerate(subtitle_segments, start=1):
-                    f.write(f"{i}\n")
+                entry_num = 0
+                for seg in subtitle_segments:
+                    text = seg["text"].strip()
+                    if not text:
+                        continue
+                    entry_num += 1
+                    f.write(f"{entry_num}\n")
                     f.write(f"{self.format_srt_time(seg['start'])} --> {self.format_srt_time(seg['end'])}\n")
-                    f.write(f"{seg['text']}\n\n")
-                    if i % 25 == 0:
-                        self.log(f"Wrote {i} subtitle entries...")
+                    f.write(f"{text}\n\n")
+                    if entry_num % 25 == 0:
+                        self.log(f"Wrote {entry_num} subtitle entries...")
         except OSError as err:
             self.log(f"Failed to write file: {err}")
 
@@ -2702,50 +3524,15 @@ class WhisperApp(QMainWindow):
                         )
                     continue
 
-            text = segment.text.strip()
-            text = self.format_subtitle_text(text, subtitle_settings)
-            if text:
-                subtitle_segments.append(
-                    {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": text,
-                    }
+            subtitle_segments.extend(
+                split_segment_text(
+                    segment.text.strip(), segment.start, segment.end, subtitle_settings
                 )
+            )
             if index % 10 == 0:
                 self.log(f"Processed {index} transcription segments, {len(subtitle_segments)} subtitles so far...")
 
         return subtitle_segments
-
-    def normalize_subtitle_timings(self, subtitle_segments):
-        if not subtitle_segments:
-            return []
-
-        normalized_segments = []
-        previous_end = 0.0
-
-        for segment in subtitle_segments:
-            start = max(float(segment["start"]), previous_end)
-            end = max(float(segment["end"]), start + 0.05)
-            text = segment["text"]
-
-            if normalized_segments:
-                gap = start - previous_end
-                if gap > 8.0:
-                    self.log(
-                        f"Large silent gap detected before subtitle {len(normalized_segments) + 1}."
-                    )
-
-            normalized_segments.append(
-                {
-                    "start": start,
-                    "end": end,
-                    "text": text,
-                }
-            )
-            previous_end = end
-
-        return normalized_segments
 
     def build_word_timed_segments(self, segment, subtitle_settings):
         words = getattr(segment, "words", None) or []
@@ -2769,12 +3556,12 @@ class WhisperApp(QMainWindow):
                     subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
                     current_words = []
 
-            # Line-overflow pre-check: if adding this word would produce more than
-            # 2 wrapped lines, commit the current batch first so the overflowing
-            # word starts the next subtitle rather than spilling into a 3rd line.
+            # Line-overflow pre-check: if adding this word would exceed the line
+            # budget, commit the current batch first so the overflowing word
+            # starts the next subtitle rather than spilling into an extra line.
             if current_words:
-                test_text = self.join_words(current_words + [word])
-                if len(self.wrap_subtitle_lines(test_text, subtitle_settings)) > 2:
+                test_text = join_words(current_words + [word])
+                if len(wrap_subtitle_lines(test_text, subtitle_settings)) > MAX_SUBTITLE_LINES:
                     subtitle_segments.append(self.create_subtitle_from_words(current_words, subtitle_settings))
                     current_words = []
 
@@ -2802,11 +3589,11 @@ class WhisperApp(QMainWindow):
         return [seg for seg in subtitle_segments if seg is not None]
 
     def create_subtitle_from_words(self, words, subtitle_settings):
-        text = self.join_words(words)
+        text = join_words(words)
         if not text:
             return None
 
-        text = self.format_subtitle_text(text, subtitle_settings)
+        text = format_subtitle_text(text, subtitle_settings)
         if not text:
             return None
 
@@ -2816,93 +3603,53 @@ class WhisperApp(QMainWindow):
             "text": text,
         }
 
-    def join_words(self, words):
-        return "".join(word.word for word in words).strip()
 
-    def format_subtitle_text(self, text, subtitle_settings):
-        lines = self.wrap_subtitle_lines(text, subtitle_settings)
-        return "\n".join(lines)
+def install_crash_handler():
+    """Surface unhandled exceptions instead of losing them.
 
-    _PROFANITY_LIST = {
-        "fuck", "fucker", "fucked", "fucking", "fuckin", "fucks",
-        "shit", "shits", "shitting", "shitty",
-        "bitch", "bitches", "bitching",
-        "ass", "asses", "asshole", "assholes",
-        "bastard", "bastards",
-        "cunt", "cunts",
-        "dick", "dicks",
-        "cock", "cocks",
-        "pussy", "pussies",
-        "whore", "whores",
-        "piss", "pissed", "pissing",
-        "damn", "damned",
-        "crap", "craps",
-        "slut", "sluts",
-        "prick", "pricks",
-        "wanker", "wankers", "wank",
-        "twat", "twats",
-        "bollocks", "bullshit",
-    }
+    The app ships windowed (console=False), so anything escaping a Qt slot would
+    otherwise vanish to a stderr nobody can see, leaving a frozen-looking window.
+    """
+    log_path = resolve_log_file(APP_DIR)
 
-    def _censor_word(self, word):
-        import re
-        core = re.sub(r"[^a-zA-Z]", "", word).lower()
-        if core in self._PROFANITY_LIST:
-            return word[0] + "*" * (len(word) - 1)
-        return word
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
 
-    def normalize_subtitle_text(self, text, subtitle_settings):
-        if not text:
-            return ""
+        details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    stamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+                    f.write(f"{stamp} UNHANDLED EXCEPTION\n{details}\n")
+            except OSError:
+                pass
 
-        if subtitle_settings.get("censor_profanity"):
-            text = " ".join(self._censor_word(w) for w in text.split())
+        location = f"\n\nDetails were written to:\n{log_path}" if log_path else ""
+        try:
+            QMessageBox.critical(
+                None,
+                f"{APP_NAME} - Unexpected Error",
+                f"{exc_type.__name__}: {exc_value}{location}",
+            )
+        except Exception:
+            # A dialog may be impossible if Qt itself is the thing that broke.
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
-        if subtitle_settings["remove_punctuation"]:
-            text = text.translate(str.maketrans("", "", ".,'?!;:\"…"))
-
-        if subtitle_settings["text_case"] == "lowercase":
-            text = text.lower()
-        elif subtitle_settings["text_case"] == "UPPERCASE":
-            text = text.upper()
-
-        return " ".join(text.split())
-
-    def wrap_subtitle_lines(self, text, subtitle_settings):
-        normalized_text = self.normalize_subtitle_text(text, subtitle_settings)
-        if not normalized_text:
-            return []
-
-        max_chars = subtitle_settings["max_chars"]
-        words = normalized_text.split()
-        lines = []
-        current_line = ""
-
-        for word in words:
-            if not current_line:
-                current_line = word
-                continue
-
-            candidate_line = f"{current_line} {word}"
-            if len(candidate_line) <= max_chars:
-                current_line = candidate_line
-            else:
-                lines.append(current_line)
-                current_line = word
-
-        if current_line:
-            lines.append(current_line)
-
-        return lines
+    sys.excepthook = handle_exception
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    install_crash_handler()
     if MODEL_DIR is None:
-        from PyQt6.QtWidgets import QMessageBox
         QMessageBox.critical(
             None,
-            "SmartCaption - Startup Error",
+            f"{APP_NAME} - Startup Error",
             f"Unable to create a writable models folder.\n\n{MODEL_DIR_ERROR}\n\n"
             "Please ensure the application has write permissions to its directory "
             "or to %LOCALAPPDATA%.",

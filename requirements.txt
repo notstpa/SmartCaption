@@ -4,6 +4,8 @@ faster-whisper>=1.2.1
 huggingface_hub>=1.10.2
 av>=17.0.0
 ctranslate2>=4.7.1
+tqdm>=4.66.0
 
-# Optional: required for CUDA GPU acceleration
-nvidia-cudnn-cu12
+# For CUDA GPU acceleration, install requirements-gpu.txt as well.
+# It is kept separate because it pulls several hundred MB of NVIDIA
+# libraries that CPU-only users do not need.

@@ -8,9 +8,12 @@ set "APP_NAME=SmartCaption"
 set "DEFAULT_APP_VERSION=1.0.0"
 set "VERSION_FILE=packaging\scripts\last_version.txt"
 
-set "APP_VERSION=%DEFAULT_APP_VERSION%"
-if exist "%VERSION_FILE%" (
-    set /p APP_VERSION=<"%VERSION_FILE%"
+rem APP_VERSION in main.py is the single source of truth. last_version.txt only
+rem records what was built last, for reference.
+set "APP_VERSION="
+for /f "delims=" %%v in ('python -c "import re,io;print(re.search(r'APP_VERSION = \"([^\"]+)\"', io.open('main.py',encoding='utf-8').read()).group(1))" 2^>nul') do set "APP_VERSION=%%v"
+if "!APP_VERSION!"=="" (
+    if exist "%VERSION_FILE%" set /p APP_VERSION=<"%VERSION_FILE%"
 )
 if "!APP_VERSION!"=="" set "APP_VERSION=%DEFAULT_APP_VERSION%"
 
@@ -163,17 +166,13 @@ rem ================================================================
 
 :get_version
 echo.
-echo Current version: !APP_VERSION!
-set "VERSION_INPUT="
-set /p VERSION_INPUT="Enter version number [!APP_VERSION!]: "
-if not "!VERSION_INPUT!"=="" set "APP_VERSION=!VERSION_INPUT!"
-if "!APP_VERSION!"=="" set "APP_VERSION=%DEFAULT_APP_VERSION%"
+echo Version from main.py: !APP_VERSION!
+echo (To change it, edit APP_VERSION in main.py and packaging\pyinstaller\version_info.txt.)
 >"!VERSION_FILE!" echo !APP_VERSION!
-echo Version set to !APP_VERSION!.
 exit /b 0
 
 :ensure_python_deps
-python -m pip install pyinstaller PyQt6 pyqtdarktheme faster-whisper huggingface_hub av ctranslate2
+python -m pip install pyinstaller -r requirements.txt
 if !errorlevel! neq 0 (
     echo.
     echo Failed to install build dependencies.
